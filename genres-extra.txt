@@ -1,0 +1,25 @@
+# Common genres missing from genres.txt (beets' list). Part of
+# genre-review, GPL-3.0. One lower-case name per line.
+abstract hip hop
+acoustic rock
+adult contemporary
+album rock
+alternative
+bro-country
+christian
+christmas
+contemporary country
+contemporary folk
+folk
+gospel
+holiday
+indie
+latin
+musical theatre
+new age
+punk
+singer-songwriter
+soundtrack
+spoken word
+video game music
+world

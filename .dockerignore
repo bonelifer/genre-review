@@ -1,0 +1,6 @@
+*
+!*.py
+!genres.txt
+!genres-extra.txt
+!LICENSE
+!LICENSE-beets

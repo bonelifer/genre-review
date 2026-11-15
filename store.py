@@ -1,0 +1,121 @@
+"""SQLite state for genre-review.
+
+Holds the album list built by the library scan, each track's genres (and
+the genres it had before genre-review first wrote it, for Revert), the
+Last.fm suggestions, and a cache of Last.fm responses.
+
+Album statuses:
+    pending  waiting for review
+    applied  reviewed; genres written to the files
+    skipped  passed over for now (shown again under "Skipped")
+    ignored  "never ask again"
+    changed  applied earlier, but the files' genres changed since
+    missing  no tracks left in the library
+"""
+
+import json
+import sqlite3
+from datetime import datetime, timezone
+from pathlib import Path
+
+SCHEMA_VERSION = 1
+STATUSES = ("pending", "applied", "skipped", "ignored", "changed", "missing")
+
+SCHEMA = """
+CREATE TABLE albums (
+    id INTEGER PRIMARY KEY,
+    album_key TEXT NOT NULL UNIQUE,
+    albumartist TEXT NOT NULL,
+    album TEXT NOT NULL,
+    folder TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    current_genres TEXT NOT NULL DEFAULT '[]',
+    suggestions TEXT,
+    suggestions_error TEXT,
+    suggested_at TEXT,
+    applied_genres TEXT,
+    applied_at TEXT,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX albums_status ON albums (status);
+CREATE TABLE tracks (
+    path TEXT PRIMARY KEY,
+    album_id INTEGER NOT NULL REFERENCES albums (id),
+    album_key TEXT NOT NULL,
+    albumartist TEXT NOT NULL,
+    album TEXT NOT NULL,
+    mtime_ns INTEGER NOT NULL,
+    size INTEGER NOT NULL,
+    genres TEXT NOT NULL,
+    original_genres TEXT
+);
+CREATE INDEX tracks_album ON tracks (album_id);
+CREATE TABLE lastfm_cache (
+    request TEXT PRIMARY KEY,
+    response TEXT NOT NULL,
+    fetched_at TEXT NOT NULL
+);
+"""
+
+
+def now_iso() -> str:
+    """Current UTC time as an ISO 8601 string (storage format)."""
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def connect(path: Path) -> sqlite3.Connection:
+    """Open (creating or migrating) the state database at path."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(path, timeout=30, isolation_level=None)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("PRAGMA foreign_keys=ON")
+    connection.execute("PRAGMA busy_timeout=30000")
+    version = connection.execute("PRAGMA user_version").fetchone()[0]
+    if version > SCHEMA_VERSION:
+        raise SystemExit(
+            f"{path} was written by a newer genre-review "
+            f"(schema {version}, this version knows {SCHEMA_VERSION})."
+        )
+    if version == 0:
+        with transaction(connection):
+            for statement in SCHEMA.split(";"):
+                if statement.strip():
+                    connection.execute(statement)
+            connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+    return connection
+
+
+class transaction:
+    """BEGIN IMMEDIATE ... COMMIT, rolling back on any exception."""
+
+    def __init__(self, connection: sqlite3.Connection):
+        self.connection = connection
+
+    def __enter__(self):
+        self.connection.execute("BEGIN IMMEDIATE")
+        return self.connection
+
+    def __exit__(self, kind, value, traceback):
+        self.connection.execute("ROLLBACK" if kind else "COMMIT")
+        return False
+
+
+def loads(text, default):
+    """Decode a JSON column, returning default for NULL."""
+    return default if text is None else json.loads(text)
+
+
+def dumps(value) -> str:
+    """Encode a JSON column."""
+    return json.dumps(value, ensure_ascii=False)
+
+
+def album_counts(connection: sqlite3.Connection) -> dict:
+    """Number of albums per status (every status present, zero if none)."""
+    counts = dict.fromkeys(STATUSES, 0)
+    for row in connection.execute(
+        "SELECT status, COUNT(*) FROM albums GROUP BY status"
+    ):
+        counts[row[0]] = row[1]
+    return counts

@@ -1,0 +1,24 @@
+services:
+  genre-review:
+    image: ghcr.io/bonelifer/genre-review:latest
+    network_mode: host
+    user: "1000:1000"
+    env_file: .env
+    environment:
+      - LIBRARY_DIR=/library
+      - STATE_DIR=/state
+      - LISTEN=127.0.0.1
+    volumes:
+      - type: bind
+        source: ${MUSIC_LIBRARY:?Set MUSIC_LIBRARY in .env}
+        target: /library
+        bind:
+          create_host_path: false
+      # Create ./data yourself (mkdir data) so it belongs to your user;
+      # Docker would otherwise create it owned by root.
+      - type: bind
+        source: ./data
+        target: /state
+        bind:
+          create_host_path: false
+    restart: unless-stopped
