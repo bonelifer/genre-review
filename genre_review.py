@@ -24,6 +24,7 @@ import library
 import mpd
 import store
 import suggest
+import tags
 
 
 @dataclass
@@ -98,7 +99,9 @@ class Reviewer:
         self.whitelist = suggest.load_whitelist()
         # Scans and tag writes never run at the same time.
         self.library_lock = threading.Lock()
-        self.status = {"scan": "not run yet", "suggest": "not run yet"}
+        self.status = {"scan": "not run yet", "suggest": "not run yet",
+                       "tags": "nothing removed or restored yet"}
+        self.tag_job = None
 
     def connect(self) -> sqlite3.Connection:
         """New connection to the state database (one per thread)."""
@@ -210,6 +213,94 @@ class Reviewer:
                        target, self.settings.mpd_password)
         except mpd.MpdError as error:
             return f"MPD update failed: {error}"
+        return ""
+
+    # --- tag cleanup -------------------------------------------------------
+
+    def start_tag_job(self, kind: str, field=None) -> str:
+        """Start removing rule fields ("apply") or restoring ("restore").
+
+        Runs in a background thread under the library lock; returns a
+        message for the page. Only one tag job runs at a time.
+        """
+        if self.tag_job is not None and self.tag_job.is_alive():
+            return "A tag job is already running; see its progress below."
+        self.tag_job = threading.Thread(
+            target=self._run_tag_job, args=(kind, field), daemon=True)
+        self.tag_job.start()
+        return ("Removing tags in the background." if kind == "apply"
+                else "Restoring tags in the background.")
+
+    def _run_tag_job(self, kind: str, field) -> None:
+        """Body of start_tag_job's thread."""
+        verb = "Removing" if kind == "apply" else "Restoring"
+
+        def progress(done, total):
+            self.status["tags"] = f"{verb}: file {done} of {total}"
+
+        self.status["tags"] = f"{verb}: waiting for the library scan"
+        try:
+            with self.library_lock:
+                connection = self.connect()
+                try:
+                    if kind == "apply":
+                        result = tags.apply_rules(
+                            connection, self.settings.library_dir, progress)
+                    else:
+                        result = tags.restore(
+                            connection, self.settings.library_dir,
+                            field=field, progress=progress)
+                    folders = [row[0] for row in connection.execute(
+                        "SELECT folder FROM albums WHERE id IN (%s)"
+                        % ",".join("?" * len(result["albums"])),
+                        result["albums"])] if result["albums"] else []
+                finally:
+                    connection.close()
+        except Exception as error:  # shown on the Tags page
+            self.status["tags"] = f"{verb} failed: {error}"
+            return
+        mpd_note = self.update_mpd_folders(folders)
+        done = "Removed tags from" if kind == "apply" else "Restored tags in"
+        message = (f"{store.now_iso()}: {done} {result['files']} files in "
+                   f"{len(result['albums'])} albums.")
+        if result["errors"]:
+            message += (f" {len(result['errors'])} files failed: "
+                        + "; ".join(result["errors"][:3]))
+        if mpd_note:
+            message += " " + mpd_note
+        self.status["tags"] = message
+
+    def restore_album_tags(self, album_id: int) -> dict:
+        """Restore every removed tag of one album (runs in the request)."""
+        if not self.library_lock.acquire(timeout=300):
+            return {"files": 0, "albums": [], "errors": [
+                "A library scan or tag job is running; try again shortly."]}
+        try:
+            connection = self.connect()
+            try:
+                result = tags.restore(connection, self.settings.library_dir,
+                                      album_id=album_id)
+                row = connection.execute(
+                    "SELECT folder FROM albums WHERE id = ?",
+                    (album_id,)).fetchone()
+            finally:
+                connection.close()
+        finally:
+            self.library_lock.release()
+        result["mpd"] = self.update_mpd_folders([row[0]] if row and
+                                                result["files"] else [])
+        return result
+
+    def update_mpd_folders(self, folders) -> str:
+        """Ask MPD to rescan folders (the whole library if there are many)."""
+        if not folders:
+            return ""
+        if len(folders) > 20:
+            return self.update_mpd("")
+        for folder in folders:
+            note = self.update_mpd(folder)
+            if note:
+                return note
         return ""
 
     def background_loop(self, stop: threading.Event) -> None:

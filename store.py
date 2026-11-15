@@ -18,7 +18,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 STATUSES = ("pending", "applied", "skipped", "ignored", "changed", "missing")
 
 SCHEMA = """
@@ -57,6 +57,29 @@ CREATE TABLE lastfm_cache (
 );
 """
 
+# Schema 2: tag inventory and cleanup.
+#   tracks.fields  JSON {field: example value} of every tag field in the
+#                  file; NULL means "read the file again on the next scan".
+#   tag_rules      fields marked for removal.
+#   removed_tags   the exact tag data taken out of each file, for Restore.
+MIGRATION_2 = """
+ALTER TABLE tracks ADD COLUMN fields TEXT;
+CREATE TABLE tag_rules (
+    field TEXT PRIMARY KEY,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE removed_tags (
+    id INTEGER PRIMARY KEY,
+    path TEXT NOT NULL,
+    field TEXT NOT NULL,
+    data BLOB NOT NULL,
+    removed_at TEXT NOT NULL,
+    restored_at TEXT
+);
+CREATE INDEX removed_tags_open ON removed_tags (field, restored_at);
+CREATE INDEX removed_tags_path ON removed_tags (path);
+"""
+
 
 def now_iso() -> str:
     """Current UTC time as an ISO 8601 string (storage format)."""
@@ -77,12 +100,17 @@ def connect(path: Path) -> sqlite3.Connection:
             f"{path} was written by a newer genre-review "
             f"(schema {version}, this version knows {SCHEMA_VERSION})."
         )
-    if version == 0:
-        with transaction(connection):
-            for statement in SCHEMA.split(";"):
-                if statement.strip():
-                    connection.execute(statement)
-            connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+    for target, script in ((1, SCHEMA), (2, MIGRATION_2)):
+        if version < target:
+            with transaction(connection):
+                # Another process may have migrated while we waited.
+                now = connection.execute("PRAGMA user_version").fetchone()[0]
+                if now < target:
+                    for statement in script.split(";"):
+                        if statement.strip():
+                            connection.execute(statement)
+                    connection.execute(f"PRAGMA user_version={target}")
+            version = target
     return connection
 
 

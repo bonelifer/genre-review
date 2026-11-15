@@ -18,6 +18,7 @@ from pathlib import Path
 import mutagen
 
 import store
+import tags as tag_fields
 
 AUDIO_EXTENSIONS = {".mp3", ".flac", ".ogg", ".oga", ".opus", ".m4a"}
 SEPARATOR = "\x1f"
@@ -113,6 +114,7 @@ def cached_track(row) -> dict:
         "album_key": row["album_key"], "albumartist": row["albumartist"],
         "album": row["album"], "genres": store.loads(row["genres"], []),
         "mtime_ns": row["mtime_ns"], "size": row["size"],
+        "fields": store.loads(row["fields"], None),
     }
 
 
@@ -133,8 +135,8 @@ def scan(connection: sqlite3.Connection, root: Path, log=print) -> dict:
     Returns counts: files, read, errors, albums, new_albums.
     """
     known = {row["path"]: row for row in connection.execute(
-        "SELECT path, album_key, albumartist, album, mtime_ns, size, genres "
-        "FROM tracks")}
+        "SELECT path, album_key, albumartist, album, mtime_ns, size, genres, "
+        "fields FROM tracks")}
     seen = {}
     read = errors = 0
     walk_errors = []
@@ -142,14 +144,17 @@ def scan(connection: sqlite3.Connection, root: Path, log=print) -> dict:
         old = known.get(relative)
         # Folder-named (untagged) tracks are always re-read, so naming
         # changes reach them; they are rare.
+        # Tracks without a tag inventory yet (fields NULL) are read again.
         if old and old["mtime_ns"] == info.st_mtime_ns \
                 and old["size"] == info.st_size \
+                and old["fields"] is not None \
                 and not old["album_key"].startswith("folder:"):
             seen[relative] = cached_track(old)
             continue
         try:
             track = read_track(root / relative)
-        except TagError as error:
+            track["fields"] = tag_fields.read_fields(root / relative)
+        except (TagError, tag_fields.TagError) as error:
             errors += 1
             log(f"skipping {error}")
             if old:
@@ -215,16 +220,18 @@ def scan(connection: sqlite3.Connection, root: Path, log=print) -> dict:
                 track = seen[relative]
                 connection.execute(
                     "INSERT INTO tracks (path, album_id, album_key, "
-                    "albumartist, album, mtime_ns, size, genres) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                    "albumartist, album, mtime_ns, size, genres, fields) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
                     "ON CONFLICT (path) DO UPDATE SET album_id = excluded."
                     "album_id, album_key = excluded.album_key, albumartist = "
                     "excluded.albumartist, album = excluded.album, mtime_ns = "
                     "excluded.mtime_ns, size = excluded.size, genres = "
-                    "excluded.genres",
+                    "excluded.genres, fields = excluded.fields",
                     (relative, album_id, key, track["albumartist"],
                      track["album"], track["mtime_ns"], track["size"],
-                     store.dumps(track["genres"])),
+                     store.dumps(track["genres"]),
+                     None if track.get("fields") is None
+                     else store.dumps(track["fields"])),
                 )
         gone = set(known) - set(seen)
         if walk_errors or (known and not seen):
@@ -335,9 +342,11 @@ def _rewrite(connection, root, album_id, genres_for, record_original,
         written += 1
         if not record_original:
             original = None
+        # fields = NULL: saving can rename frames (v2.3 -> v2.4), so the
+        # next scan reads this file's tag inventory again.
         connection.execute(
             "UPDATE tracks SET genres = ?, original_genres = ?, mtime_ns = ?, "
-            "size = ? WHERE path = ?",
+            "size = ?, fields = NULL WHERE path = ?",
             (store.dumps(genres), original, info.st_mtime_ns, info.st_size,
              track["path"]))
     current = []

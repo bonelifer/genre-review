@@ -2,7 +2,8 @@
 
 A small web page for cleaning up the genre tags in a music library one album
 at a time. It suggests genres from Last.fm, you pick the ones you want, and
-it writes only the genre tag into the files.
+it writes only the genre tag into the files. A second page lists every tag
+field in the library and removes the ones you don't want, with undo.
 
 Suggestions come from the album's Last.fm tags, with the artist's tags filling
 in when the album has few. Your current genre tags count too. Every name is
@@ -29,6 +30,28 @@ then list each genre on its own.
   them.
 - **Bulk accept** previews albums whose own Last.fm tags agree strongly, so
   you can approve many at once. Nothing is written until you confirm.
+
+## Tag cleanup
+
+The **Tags** page lists every tag field found in the library, with how many
+files and albums carry it and a few example values. Click an album count to
+see which albums have that field.
+
+Tick fields you don't want (record labels, barcodes, encoder notes, and so
+on) and save. The page then shows how many MP3 files and albums would
+change, and nothing is touched until you press **Remove these tags from the
+files**. Removal runs in the background and asks MPD to rescan what it
+changed.
+
+- Core fields can't be removed: titles, artists, album, track and disc
+  numbers, dates, genres, cover art, ReplayGain and MusicBrainz IDs.
+- Every removed tag is stored byte for byte in SQLite. **Restore** puts a
+  field back across the library, and each album page can restore its own
+  tags.
+- Only MP3 files are cleaned. Other formats show up in the list but are left
+  alone.
+- An ID3v2.3 file stays ID3v2.3. The audio is not touched.
+- New downloads are cleaned only when you press the button again.
 
 ## Setup
 

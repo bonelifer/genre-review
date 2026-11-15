@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import mutagen  # noqa: E402
 from mutagen.easyid3 import EasyID3  # noqa: E402
 from mutagen.flac import FLAC  # noqa: E402
-from mutagen.id3 import ID3  # noqa: E402
+from mutagen.id3 import APIC, ID3, TPUB, TXXX  # noqa: E402
 
 import genre_review  # noqa: E402
 import lastfm  # noqa: E402
@@ -28,6 +28,7 @@ import library  # noqa: E402
 import mpd  # noqa: E402
 import store  # noqa: E402
 import suggest  # noqa: E402
+import tags  # noqa: E402
 import web  # noqa: E402
 
 
@@ -683,6 +684,206 @@ class WebTests(unittest.TestCase):
             web.clean_genres(["x" * 61])
         with self.assertRaises(ValueError):
             web.clean_genres(["bad\x07name"])
+
+
+def add_clutter(path: Path):
+    """Give an MP3 (ID3v2.3) a label, a barcode, ReplayGain and a cover."""
+    id3 = ID3(path)
+    id3.add(TPUB(encoding=3, text=["Some Label"]))
+    id3.add(TXXX(encoding=3, desc="BARCODE", text=["0123456789"]))
+    id3.add(TXXX(encoding=3, desc="REPLAYGAIN_TRACK_GAIN",
+                 text=["-7.00 dB"]))
+    id3.add(APIC(encoding=3, mime="image/png", type=3, desc="",
+                 data=b"\x89PNG fake"))
+    id3.save(path, v2_version=3)
+
+
+class TagTests(unittest.TestCase):
+    """Inventory, removal with backups, restore, and the schema upgrade."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name) / "library"
+        self.track = self.root / "A/Album/01.mp3"
+        make_mp3(self.track, genre=["Rock"])
+        add_clutter(self.track)
+        self.db = store.connect(Path(self.temp.name) / "db.sqlite")
+        library.scan(self.db, self.root, log=lambda _: None)
+
+    def tearDown(self):
+        self.db.close()
+        self.temp.cleanup()
+
+    def frames(self):
+        return {tags.field_key(frame) for frame in ID3(self.track).values()}
+
+    def test_inventory_counts_examples_and_protection(self):
+        found = {item["field"]: item for item in tags.inventory(self.db)}
+        self.assertEqual(found["TPUB"]["files"], 1)
+        self.assertEqual(found["TPUB"]["examples"], ["Some Label"])
+        self.assertFalse(found["TPUB"]["protected"])
+        for field in ("TIT2", "TCON", "APIC:", "TXXX:REPLAYGAIN_TRACK_GAIN"):
+            if field in found:
+                self.assertTrue(found[field]["protected"], field)
+        self.assertTrue(tags.is_protected("TXXX:MusicBrainz Album Id"))
+        self.assertIn("TPUB", tags.describe("TPUB"))
+        self.assertEqual(tags.describe("TXXX:BARCODE"),
+                         "BARCODE (custom text, TXXX)")
+
+    def test_rules_refuse_protected_fields(self):
+        tags.save_rules(self.db, ["TPUB", "TIT2", "APIC:"])
+        self.assertEqual(tags.rule_fields(self.db), {"TPUB"})
+
+    def test_apply_removes_only_rule_fields_and_keeps_version(self):
+        tags.save_rules(self.db, ["TPUB", "TXXX:BARCODE"])
+        result = tags.apply_rules(self.db, self.root)
+        self.assertEqual((result["files"], result["errors"]), (1, []))
+        left = self.frames()
+        self.assertNotIn("TPUB", left)
+        self.assertNotIn("TXXX:BARCODE", left)
+        self.assertIn("TXXX:REPLAYGAIN_TRACK_GAIN", left)
+        self.assertIn("APIC:", left)
+        self.assertEqual(ID3(self.track).version[:2], (2, 3))
+        stored = self.db.execute("SELECT fields FROM tracks").fetchone()[0]
+        self.assertNotIn("TPUB", store.loads(stored, {}))
+        self.assertEqual(self.db.execute(
+            "SELECT COUNT(*) FROM removed_tags").fetchone()[0], 2)
+
+    def test_restore_field_puts_back_the_exact_frame(self):
+        tags.save_rules(self.db, ["TPUB", "TXXX:BARCODE"])
+        tags.apply_rules(self.db, self.root)
+        result = tags.restore(self.db, self.root, field="TPUB")
+        self.assertEqual(result["files"], 1)
+        id3 = ID3(self.track)
+        self.assertEqual(id3["TPUB"].text, ["Some Label"])
+        self.assertNotIn("TXXX:BARCODE", self.frames())
+        tags.restore(self.db, self.root, album_id=1)
+        self.assertEqual(ID3(self.track)["TXXX:BARCODE"].text,
+                         ["0123456789"])
+        self.assertEqual(self.db.execute(
+            "SELECT COUNT(*) FROM removed_tags WHERE restored_at IS NULL"
+        ).fetchone()[0], 0)
+
+    def test_backup_is_stored_before_the_file_changes(self):
+        tags.save_rules(self.db, ["TPUB"])
+        original = tags.write_removal
+
+        def crash(path, fields):
+            raise tags.TagError("disk full")
+
+        tags.write_removal = crash
+        try:
+            result = tags.apply_rules(self.db, self.root)
+        finally:
+            tags.write_removal = original
+        self.assertEqual(len(result["errors"]), 1)
+        self.assertIn("TPUB", self.frames())
+        self.assertEqual(self.db.execute(
+            "SELECT field FROM removed_tags").fetchone()[0], "TPUB")
+
+    def test_flac_files_are_never_changed(self):
+        flac = self.root / "B/Other/01.flac"
+        make_flac(flac, album="Other")
+        library.scan(self.db, self.root, log=lambda _: None)
+        tags.save_rules(self.db, ["album", "ALBUM"])
+        self.assertEqual(tags.affected(self.db, tags.rule_fields(self.db)),
+                         [])
+
+    def test_genre_write_makes_the_scan_reread_fields(self):
+        library.apply_album(self.db, self.root, 1, ["Pop"])
+        self.assertIsNone(self.db.execute(
+            "SELECT fields FROM tracks").fetchone()[0])
+        self.assertEqual(library.scan(self.db, self.root,
+                                      log=lambda _: None)["read"], 1)
+
+    def test_schema_1_database_is_upgraded(self):
+        path = Path(self.temp.name) / "old.sqlite"
+        old = store.sqlite3.connect(path)
+        for statement in store.SCHEMA.split(";"):
+            if statement.strip():
+                old.execute(statement)
+        old.execute("PRAGMA user_version=1")
+        old.commit()
+        old.close()
+        upgraded = store.connect(path)
+        try:
+            self.assertEqual(upgraded.execute(
+                "PRAGMA user_version").fetchone()[0], 2)
+            columns = {row[1] for row in upgraded.execute(
+                "PRAGMA table_info(tracks)")}
+            self.assertIn("fields", columns)
+            upgraded.execute("SELECT COUNT(*) FROM removed_tags")
+        finally:
+            upgraded.close()
+
+
+class TagPageTests(unittest.TestCase):
+    """The Tags pages end to end."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        base = Path(self.temp.name)
+        self.root = base / "library"
+        self.track = self.root / "A/Album/01.mp3"
+        make_mp3(self.track)
+        add_clutter(self.track)
+        settings = genre_review.Settings(
+            library_dir=self.root, state_dir=base / "state",
+            lastfm_api_key="", listen="127.0.0.1", port=0,
+            scan_interval_minutes=0, max_genres=3, bulk_min_weight=60,
+            mpd_host="127.0.0.1", mpd_port=1, mpd_password="",
+            mpd_path_prefix="")
+        self.reviewer = genre_review.Reviewer(settings, log=lambda _: None)
+        self.reviewer.scan()
+        self.server = web.ReviewServer(("127.0.0.1", 0), self.reviewer)
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+        threading.Thread(target=self.server.serve_forever,
+                         daemon=True).start()
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.temp.cleanup()
+
+    def get(self, path):
+        with urlopen(self.base + path, timeout=10) as response:
+            return response.read().decode()
+
+    def post(self, path, fields):
+        request = Request(self.base + path, urlencode(fields, doseq=True)
+                          .encode(), method="POST")
+        with urlopen(request, timeout=10) as response:
+            return response.url
+
+    def test_tags_page_lists_fields_and_protects_core_ones(self):
+        body = self.get("/tags")
+        self.assertIn('value="TPUB"', body)
+        self.assertNotIn('value="TIT2"', body)
+        self.assertIn(">kept<", body)
+        self.assertIn("Artist - Album", self.get("/tags/field?name=TPUB"))
+
+    def test_save_rules_remove_and_restore_through_the_page(self):
+        token = self.server.token
+        url = self.post("/tags/rules", {"token": token, "field": ["TPUB"]})
+        self.assertIn("1+fields+marked", url)
+        self.assertIn("1 MP3 files", self.get("/tags"))
+        self.post("/tags/apply", {"token": token})
+        self.reviewer.tag_job.join(10)
+        self.assertNotIn("TPUB", ID3(self.track))
+        self.assertIn("Removed tags from 1 files",
+                      self.reviewer.status["tags"])
+        body = self.get("/album/1")
+        self.assertIn("Tags removed by the cleanup", body)
+        url = self.post("/album/1/restore-tags", {"token": token})
+        self.assertIn("Restored+tags+in+1+files", url)
+        self.assertEqual(ID3(self.track)["TPUB"].text, ["Some Label"])
+
+    def test_tag_forms_need_the_token(self):
+        request = Request(self.base + "/tags/apply", b"token=wrong",
+                          method="POST")
+        with self.assertRaises(HTTPError) as caught:
+            urlopen(request, timeout=10)
+        self.assertEqual(caught.exception.code, 403)
 
 
 class CliTests(unittest.TestCase):
