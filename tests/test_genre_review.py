@@ -639,6 +639,43 @@ class WebTests(unittest.TestCase):
         with urlopen(self.base + "/next", timeout=10) as response:
             self.assertTrue(response.url.endswith("/album/1"))
 
+    def test_review_list_offers_checkboxes_with_default_genres(self):
+        _, body = self.get("/albums?filter=pending")
+        self.assertIn('name="album" value="1"', body)
+        self.assertNotIn('value="1" id="a1" checked', body)
+        self.assertIn("Indie Rock, Rock", body)
+        _, body = self.get("/albums?filter=pending&tick=all")
+        self.assertIn('value="1" id="a1" checked', body)
+        _, body = self.get("/albums?filter=applied")
+        self.assertNotIn('name="album"', body)
+
+    def test_approve_ticked_writes_default_genres(self):
+        status, url = self.post("/approve", {
+            "token": self.server.token, "filter": "pending", "page": "1",
+            "album": "1"})
+        self.assertEqual(status, 200)
+        self.assertIn("filter=pending", url)
+        self.assertIn("Wrote+genres+for+1+albums", url)
+        self.assertEqual(genres_of(self.track), ["Indie Rock", "Rock"])
+
+    def test_approve_refuses_albums_no_longer_in_review(self):
+        db = self.reviewer.connect()
+        db.execute("UPDATE albums SET status = 'ignored'")
+        db.close()
+        _, url = self.post("/approve", {"token": self.server.token,
+                                        "album": "1"})
+        self.assertIn("Nothing+written", url)
+        self.assertEqual(genres_of(self.track), ["Rock/Pop"])
+
+    def test_approve_changed_album_keeps_its_approved_genres(self):
+        db = self.reviewer.connect()
+        db.execute("UPDATE albums SET status = 'changed', applied_genres = ?",
+                   (store.dumps(["Shoegaze"]),))
+        db.close()
+        self.post("/approve", {"token": self.server.token,
+                               "filter": "changed", "album": "1"})
+        self.assertEqual(genres_of(self.track), ["Shoegaze"])
+
     def test_clean_genres(self):
         self.assertEqual(web.clean_genres(["Rock,  Pop ", "rock"]),
                          ["Rock", "Pop"])
