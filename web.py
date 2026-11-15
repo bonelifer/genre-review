@@ -319,23 +319,11 @@ class Handler(BaseHTTPRequestHandler):
         connection = self.db()
         try:
             row = None
-            if after_id is not None:
-                current = connection.execute(
-                    "SELECT albumartist, album FROM albums WHERE id = ?",
-                    (after_id,)).fetchone()
-                if current is not None:
-                    row = connection.execute(
-                        "SELECT id FROM albums WHERE status IN ('pending', "
-                        "'changed') AND id != ? AND (albumartist COLLATE "
-                        "NOCASE, album COLLATE NOCASE, id) > (?, ?, ?) "
-                        f"ORDER BY {ORDER} LIMIT 1",
-                        (after_id, current["albumartist"], current["album"],
-                         after_id)).fetchone()
-            if row is None:
-                row = connection.execute(
-                    "SELECT id FROM albums WHERE status IN ('pending', "
-                    f"'changed') AND id != ? ORDER BY {ORDER} LIMIT 1",
-                    (after_id or 0,)).fetchone()
+            # Albums whose Last.fm lookup is done come first.
+            for ready in ("AND suggestions IS NOT NULL", ""):
+                row = self.next_row(connection, after_id, ready)
+                if row is not None:
+                    break
         finally:
             connection.close()
         if row is None:
@@ -346,6 +334,30 @@ class Handler(BaseHTTPRequestHandler):
             return self.redirect(f"/album/{row['id']}?"
                                  + urlencode({"msg": message}))
         return self.redirect(f"/album/{row['id']}")
+
+    @staticmethod
+    def next_row(connection, after_id, ready: str):
+        """Next reviewable album after after_id (wrapping), or None.
+
+        ready is an extra SQL condition (a constant, never user input).
+        """
+        base = f"status IN ('pending', 'changed') {ready} AND id != ?"
+        if after_id is not None:
+            current = connection.execute(
+                "SELECT albumartist, album FROM albums WHERE id = ?",
+                (after_id,)).fetchone()
+            if current is not None:
+                row = connection.execute(
+                    f"SELECT id FROM albums WHERE {base} AND (albumartist "
+                    "COLLATE NOCASE, album COLLATE NOCASE, id) > (?, ?, ?) "
+                    f"ORDER BY {ORDER} LIMIT 1",
+                    (after_id, current["albumartist"], current["album"],
+                     after_id)).fetchone()
+                if row is not None:
+                    return row
+        return connection.execute(
+            f"SELECT id FROM albums WHERE {base} ORDER BY {ORDER} LIMIT 1",
+            (after_id or 0,)).fetchone()
 
     def album_page(self, album_id: int, message: str) -> None:
         """One album: current genres, suggestions, and the review form."""
