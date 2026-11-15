@@ -893,9 +893,9 @@ class Handler(BaseHTTPRequestHandler):
         """Every tag field in the library, removal rules and preview."""
         connection = self.db()
         try:
-            fields = tags.inventory(connection)
+            fields = tags.cached_inventory(connection)
             rules = tags.rule_fields(connection)
-            targets = tags.affected(connection, rules)
+            targets = tags.cached_affected(connection, rules)
             pending = connection.execute(
                 "SELECT COUNT(*) FROM tracks WHERE fields IS NULL"
             ).fetchone()[0]

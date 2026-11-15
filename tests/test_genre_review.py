@@ -796,6 +796,23 @@ class TagTests(unittest.TestCase):
         self.assertEqual(library.scan(self.db, self.root,
                                       log=lambda _: None)["read"], 1)
 
+    def test_cached_inventory_follows_changes(self):
+        def tpub_files():
+            found = {item["field"]: item
+                     for item in tags.cached_inventory(self.db)}
+            return found.get("TPUB", {}).get("files", 0)
+
+        self.assertEqual(tpub_files(), 1)
+        tags.save_rules(self.db, ["TPUB"])
+        self.assertTrue({item["field"]: item for item in
+                         tags.cached_inventory(self.db)}["TPUB"]["rule"])
+        self.assertEqual(len(tags.cached_affected(self.db, {"TPUB"})), 1)
+        tags.apply_rules(self.db, self.root)
+        self.assertEqual(tpub_files(), 0)
+        self.assertEqual(tags.cached_affected(self.db, {"TPUB"}), [])
+        tags.restore(self.db, self.root, field="TPUB")
+        self.assertEqual(tpub_files(), 1)
+
     def test_schema_1_database_is_upgraded(self):
         path = Path(self.temp.name) / "old.sqlite"
         old = store.sqlite3.connect(path)

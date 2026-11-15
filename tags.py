@@ -13,6 +13,7 @@ what was taken out.
 import io
 import re
 import sqlite3
+import threading
 from pathlib import Path
 
 import mutagen
@@ -37,6 +38,11 @@ PROTECTED_PATTERNS = (
     re.compile(r"^UFID:http://musicbrainz\.org$"),
 )
 EXAMPLE_LENGTH = 60
+
+# The inventory unpacks every track's field list, which takes seconds on a
+# large library, so results are kept until the data behind them changes.
+_cache = {}
+_cache_lock = threading.Lock()
 
 
 class TagError(Exception):
@@ -238,6 +244,50 @@ def inventory(connection: sqlite3.Connection) -> list:
             "rule": field in rules, "removed": count,
         })
     return result
+
+
+def fingerprint(connection: sqlite3.Connection) -> tuple:
+    """Cheap summary that changes whenever the inventory could change."""
+    tracks = tuple(connection.execute(
+        "SELECT COUNT(*), TOTAL(mtime_ns), TOTAL(size), "
+        "SUM(fields IS NULL) FROM tracks").fetchone())
+    removed = connection.execute(
+        "SELECT COUNT(*), MAX(id), MAX(restored_at) FROM removed_tags"
+    ).fetchone()
+    rules = connection.execute(
+        "SELECT group_concat(field, char(31)) FROM (SELECT field FROM "
+        "tag_rules ORDER BY field)").fetchone()[0]
+    return tracks + tuple(removed) + (rules,)
+
+
+def _cached(name: str, key: tuple, compute):
+    """Return compute() for key, reusing the last result while key holds."""
+    with _cache_lock:
+        entry = _cache.get(name)
+        if entry is not None and entry[0] == key:
+            return entry[1]
+    value = compute()
+    with _cache_lock:
+        _cache[name] = (key, value)
+    return value
+
+
+def cached_inventory(connection: sqlite3.Connection) -> list:
+    """inventory(), reused until the tracks, rules or removals change."""
+    return _cached("inventory", fingerprint(connection),
+                   lambda: inventory(connection))
+
+
+def cached_affected(connection: sqlite3.Connection, fields) -> list:
+    """affected(), reused until the data or the field set changes."""
+    key = fingerprint(connection) + (tuple(sorted(fields)),)
+    return _cached("affected", key, lambda: affected(connection, fields))
+
+
+def warm_cache(connection: sqlite3.Connection) -> None:
+    """Compute the inventory ahead of the next page view."""
+    cached_inventory(connection)
+    cached_affected(connection, rule_fields(connection))
 
 
 def rule_fields(connection: sqlite3.Connection) -> set:

@@ -260,6 +260,7 @@ class Reviewer:
             self.status["tags"] = f"{verb} failed: {error}"
             return
         mpd_note = self.update_mpd_folders(folders)
+        self.warm_tag_cache()
         done = "Removed tags from" if kind == "apply" else "Restored tags in"
         message = (f"{store.now_iso()}: {done} {result['files']} files in "
                    f"{len(result['albums'])} albums.")
@@ -269,6 +270,16 @@ class Reviewer:
         if mpd_note:
             message += " " + mpd_note
         self.status["tags"] = message
+
+    def warm_tag_cache(self) -> None:
+        """Prepare the Tags page's inventory in the background thread."""
+        connection = self.connect()
+        try:
+            tags.warm_cache(connection)
+        except Exception as error:  # the page computes it on demand
+            self.log(f"could not prepare the tag inventory: {error}")
+        finally:
+            connection.close()
 
     def restore_album_tags(self, album_id: int) -> dict:
         """Restore every removed tag of one album (runs in the request)."""
@@ -309,6 +320,7 @@ class Reviewer:
             try:
                 self.scan()
                 self.suggest_missing()
+                self.warm_tag_cache()
             except Exception as error:  # keep the web page alive
                 self.log(f"background pass failed: {error}")
                 self.status["scan"] = f"failed: {error}"
