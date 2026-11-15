@@ -566,7 +566,7 @@ class WebTests(unittest.TestCase):
         status, body = self.get("/album/1")
         self.assertIn('value="Indie Rock" checked', body)
         self.assertIn('value="Rock" checked', body)
-        self.assertIn("1 track.", body)
+        self.assertIn("1 track in", body)
 
     def test_apply_needs_the_token(self):
         status, _ = self.post("/album/1/apply", {"token": "wrong",
