@@ -2,8 +2,9 @@
 
 A small web page for cleaning up the genre tags in a music library one album
 at a time. It suggests genres from Last.fm, you pick the ones you want, and
-it writes only the genre tag into the files. A second page lists every tag
-field in the library and removes the ones you don't want, with undo.
+it writes only the genre tag into the files. Other pages list every tag
+field in the library (removing the ones you don't want, with undo) and fill
+missing lyrics from LRCLIB.
 
 Suggestions come from the album's Last.fm tags, with the artist's tags filling
 in when the album has few. Your current genre tags count too. Every name is
@@ -52,6 +53,29 @@ changed.
   alone.
 - An ID3v2.3 file stays ID3v2.3. The audio is not touched.
 - New downloads are cleaned only when you press the button again.
+
+## Lyrics
+
+The **Lyrics** page shows how many tracks have lyrics (a `.lrc` or `.txt`
+file beside them, or lyrics in their tags) and lists the albums still
+missing some. **Fill missing lyrics** looks those tracks up on
+[LRCLIB](https://lrclib.net/) in the background:
+
+- Synced lyrics are saved as `Song.lrc` beside `Song.mp3`; plain lyrics as
+  `Song.txt`. This is where myMPD and most players look.
+- Existing lyrics files and embedded lyrics are never replaced.
+- For live takes and other versions whose length doesn't match any LRCLIB
+  entry, the plain words from the closest match are saved as `.txt`, since
+  synced timings wouldn't fit.
+- Requests go one at a time with a short pause and identify this tool, as
+  LRCLIB asks for batch work. A first fill of about 13,000 tracks takes a
+  few hours; the fill can be stopped and continues where it left off.
+- Tracks LRCLIB doesn't have are tried again after 90 days.
+- **Remove written lyrics files** deletes only files genre-review wrote and
+  that are still unchanged.
+
+With `LYRICS_AUTO_FILL=1`, new tracks are looked up after each scan (up to
+`LYRICS_AUTO_LIMIT` per scan).
 
 ## Setup
 
