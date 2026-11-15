@@ -27,6 +27,8 @@ FILTERS = {
     "ignored": "Never ask again",
 }
 ORDER = "albumartist COLLATE NOCASE, album COLLATE NOCASE, id"
+# Lists whose albums can be ticked and approved together.
+APPROVABLE = ("pending", "changed", "skipped")
 
 STYLE = """
 :root { color-scheme: light dark; --bg: #fff; --fg: #1b1b1b; --muted: #555;
@@ -87,6 +89,17 @@ def genre_list(genres) -> str:
     """Comma-separated genres, or a muted 'none'."""
     return esc(", ".join(genres)) if genres else \
         '<span class="muted">none</span>'
+
+
+def default_genres(status: str, suggestions, applied, limit: int) -> list:
+    """Genres ticked by default for an album (album page and multi-approve).
+
+    An album approved before keeps its approved genres; otherwise the best
+    suggestions are used.
+    """
+    if status in ("applied", "changed") and applied:
+        return list(applied)
+    return suggest.preselected(suggestions or [], limit)
 
 
 def clean_genres(values) -> list:
@@ -195,7 +208,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.overview(query.get("msg", [""])[0])
         if url.path == "/albums":
             return self.album_list(query.get("filter", ["pending"])[0],
-                                   query.get("page", ["1"])[0])
+                                   query.get("page", ["1"])[0],
+                                   query.get("tick", [""])[0] == "all",
+                                   query.get("msg", [""])[0])
         if url.path == "/next":
             return self.go_next(None)
         if url.path == "/bulk":
@@ -218,6 +233,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.start_scan()
         if path == "/bulk":
             return self.bulk_apply(form)
+        if path == "/approve":
+            return self.approve_ticked(form)
         match = re.fullmatch(r"/album/(\d+)/(apply|skip|ignore|revert|"
                              r"unignore)", path)
         if not match:
@@ -265,8 +282,13 @@ class Handler(BaseHTTPRequestHandler):
             "<button type=\"submit\">Scan the library now</button></form>"
             "<p><a href=\"/next\">Review the next album</a></p>"))
 
-    def album_list(self, name: str, page_text: str) -> None:
-        """Paged list of albums in one filter."""
+    def album_list(self, name: str, page_text: str, tick_all: bool = False,
+                   message: str = "") -> None:
+        """Paged list of albums in one filter.
+
+        In the review lists every album with suggestions gets a checkbox,
+        so several can be approved at once with their default genres.
+        """
         if name not in FILTERS:
             return self.not_found()
         page = max(1, int(page_text)) if page_text.isdigit() else 1
@@ -277,19 +299,38 @@ class Handler(BaseHTTPRequestHandler):
                 f"SELECT COUNT(*) FROM albums WHERE {where}",
                 params).fetchone()[0]
             rows = connection.execute(
-                f"SELECT id, albumartist, album, current_genres, "
-                f"applied_genres FROM albums WHERE {where} ORDER BY {ORDER} "
-                "LIMIT ? OFFSET ?",
+                f"SELECT id, albumartist, album, status, current_genres, "
+                f"suggestions, applied_genres FROM albums WHERE {where} "
+                f"ORDER BY {ORDER} LIMIT ? OFFSET ?",
                 (*params, PAGE_SIZE, (page - 1) * PAGE_SIZE)).fetchall()
         finally:
             connection.close()
-        items = "".join(
-            f"<tr><td><a href=\"/album/{row['id']}\">"
-            f"{esc(row['albumartist'] or 'Unknown artist')} - "
-            f"{esc(row['album'])}</a></td><td>"
-            f"{genre_list(store.loads(row['current_genres'], []))}</td></tr>"
-            for row in rows) or (
-            "<tr><td colspan=\"2\">No albums here.</td></tr>")
+        approvable = name in APPROVABLE
+        limit = self.reviewer.settings.max_genres
+        items = []
+        for row in rows:
+            title = (f"{esc(row['albumartist'] or 'Unknown artist')} - "
+                     f"{esc(row['album'])}")
+            cells = (f"<td><a href=\"/album/{row['id']}\">{title}</a></td>"
+                     f"<td>{genre_list(store.loads(row['current_genres'], []))}"
+                     "</td>")
+            if approvable:
+                genres = default_genres(
+                    row["status"], store.loads(row["suggestions"], None),
+                    store.loads(row["applied_genres"], None), limit)
+                if genres:
+                    box = (f"<input type=\"checkbox\" name=\"album\" "
+                           f"value=\"{row['id']}\" id=\"a{row['id']}\""
+                           f"{' checked' if tick_all else ''} aria-label=\""
+                           f"Approve {title}\">")
+                else:
+                    box = '<span class="muted">-</span>'
+                cells = (f"<td>{box}</td>{cells}<td>{genre_list(genres)}"
+                         "</td>")
+            items.append(f"<tr>{cells}</tr>")
+        columns = 4 if approvable else 2
+        body_rows = "".join(items) or (
+            f"<tr><td colspan=\"{columns}\">No albums here.</td></tr>")
         pages = ""
         if page > 1:
             pages += (f"<a href=\"/albums?{urlencode({'filter': name, 'page': page - 1})}\">"
@@ -297,11 +338,38 @@ class Handler(BaseHTTPRequestHandler):
         if page * PAGE_SIZE < total:
             pages += (f"<a href=\"/albums?{urlencode({'filter': name, 'page': page + 1})}\">"
                       "Next page</a>")
+        notice = f"<p class=\"notice\" role=\"status\">{esc(message)}</p>" \
+            if message else ""
+        head = ("<th scope=\"col\">Album</th><th scope=\"col\">Genres in "
+                "the files</th>")
+        if approvable:
+            toggle = {"filter": name, "page": page}
+            if not tick_all:
+                toggle["tick"] = "all"
+            head = ("<th scope=\"col\">Approve</th>" + head
+                    + "<th scope=\"col\">Will become</th>")
+        table = (f"<table><thead><tr>{head}</tr></thead>"
+                 f"<tbody>{body_rows}</tbody></table>")
+        if approvable:
+            content = (
+                "<p>Tick albums to approve them with the genres shown under "
+                "<em>Will become</em> (the ones their album page would "
+                "tick). Albums without suggestions need their own page.</p>"
+                f"<p><a href=\"/albums?{urlencode(toggle)}\">"
+                f"{'Untick all' if tick_all else 'Tick all on this page'}"
+                "</a></p>"
+                f"<form method=\"post\" action=\"/approve\">"
+                f"{self.token_field()}"
+                f"<input type=\"hidden\" name=\"filter\" value=\"{esc(name)}\">"
+                f"<input type=\"hidden\" name=\"page\" value=\"{page}\">"
+                + table
+                + "<button type=\"submit\">Write genres for the ticked "
+                "albums</button></form>")
+        else:
+            content = table
         self.send_page(FILTERS[name], (
-            f"<h1>{esc(FILTERS[name])}</h1><p>{total} albums.</p>"
-            "<table><thead><tr><th scope=\"col\">Album</th>"
-            "<th scope=\"col\">Genres in the files</th></tr></thead>"
-            f"<tbody>{items}</tbody></table><p>{pages}</p>"))
+            f"<h1>{esc(FILTERS[name])}</h1>{notice}<p>{total} albums.</p>"
+            f"{content}<p>{pages}</p>"))
 
     @staticmethod
     def filter_sql(name: str):
@@ -376,11 +444,8 @@ class Handler(BaseHTTPRequestHandler):
         current = store.loads(album["current_genres"], [])
         suggestions = store.loads(album["suggestions"], None)
         applied = store.loads(album["applied_genres"], None)
-        if album["status"] in ("applied", "changed") and applied:
-            ticked = applied
-        else:
-            ticked = suggest.preselected(suggestions or [],
-                                         settings.max_genres)
+        ticked = default_genres(album["status"], suggestions, applied,
+                                settings.max_genres)
         choices = "".join(
             f"<li><label><input type=\"checkbox\" name=\"genre\" "
             f"value=\"{esc(item['name'])}\""
@@ -576,12 +641,51 @@ class Handler(BaseHTTPRequestHandler):
         """Write the preselected genres for each ticked album."""
         chosen = {int(value) for value in form.get("album", [])
                   if value.isdigit()}
+        pairs = [(row["id"], genres) for row, genres in self.bulk_candidates()
+                 if row["id"] in chosen and genres]
+        self.redirect("/?" + urlencode({"msg": self.apply_many(pairs)}))
+
+    def approve_ticked(self, form) -> None:
+        """Approve the albums ticked on a review list with default genres.
+
+        Each album is re-checked here: it must still be in a review list
+        and have genres to write, so a stale page cannot write anything
+        unexpected.
+        """
+        name = form.get("filter", ["pending"])[0]
+        name = name if name in APPROVABLE else "pending"
+        page = form.get("page", ["1"])[0]
+        page = page if page.isdigit() else "1"
+        chosen = sorted({int(value) for value in form.get("album", [])
+                         if value.isdigit()})
+        limit = self.reviewer.settings.max_genres
+        pairs = []
+        connection = self.db()
+        try:
+            for album_id in chosen:
+                row = connection.execute(
+                    "SELECT status, suggestions, applied_genres FROM albums "
+                    "WHERE id = ?", (album_id,)).fetchone()
+                if row is None or row["status"] not in APPROVABLE:
+                    continue
+                genres = default_genres(
+                    row["status"], store.loads(row["suggestions"], None),
+                    store.loads(row["applied_genres"], None), limit)
+                if genres:
+                    pairs.append((album_id, genres))
+        finally:
+            connection.close()
+        message = self.apply_many(pairs) if pairs else \
+            "Nothing written: no albums with genres were ticked."
+        self.redirect("/albums?" + urlencode(
+            {"filter": name, "page": page, "msg": message}))
+
+    def apply_many(self, pairs) -> str:
+        """Apply (album id, genres) pairs; returns a one-line summary."""
         written = failed = mpd_failed = 0
         mpd_message = ""
-        for row, genres in self.bulk_candidates():
-            if row["id"] not in chosen or not genres:
-                continue
-            result = self.reviewer.apply(row["id"], genres)
+        for album_id, genres in pairs:
+            result = self.reviewer.apply(album_id, genres)
             if result["errors"]:
                 failed += 1
             else:
@@ -596,4 +700,4 @@ class Handler(BaseHTTPRequestHandler):
         if mpd_failed:
             message += (f" MPD was not told about {mpd_failed} albums "
                         f"({mpd_message}); run an MPD library update.")
-        self.redirect("/?" + urlencode({"msg": message}))
+        return message
