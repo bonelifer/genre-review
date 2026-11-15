@@ -8,6 +8,7 @@ files carry a per-process token so other sites cannot submit them.
 import html
 import re
 import secrets
+from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlencode, urlsplit
@@ -31,32 +32,125 @@ ORDER = "albumartist COLLATE NOCASE, album COLLATE NOCASE, id"
 APPROVABLE = ("pending", "changed", "skipped")
 
 STYLE = """
-:root { color-scheme: light dark; --bg: #fff; --fg: #1b1b1b; --muted: #555;
-  --line: #ccc; --accent: #0b57d0; --warn: #a40000; --card: #f4f4f4; }
-@media (prefers-color-scheme: dark) { :root { --bg: #161616; --fg: #ececec;
-  --muted: #aaa; --line: #444; --accent: #8ab4f8; --warn: #ff8a80;
-  --card: #222; } }
-body { background: var(--bg); color: var(--fg); font: 16px/1.5 system-ui,
-  sans-serif; margin: 0 auto; max-width: 60rem; padding: 0 1rem 3rem; }
-a { color: var(--accent); }
+:root { color-scheme: light dark;
+  --bg: #ffffff; --surface: #f5f6f8; --stripe: #f8f9fb; --fg: #1b1c1e;
+  --muted: #5b6068; --line: #d6d9de; --accent: #0b57d0; --on-accent: #fff;
+  --picked: #e7effd; --warn: #a40000; --ok: #146c2e; --ok-bg: #e6f4ea;
+  --warn-bg: #fce8e6; --info-bg: #e8f0fe; --radius: 8px; }
+@media (prefers-color-scheme: dark) { :root {
+  --bg: #131416; --surface: #1d1f23; --stripe: #18191c; --fg: #e8eaed;
+  --muted: #a8adb4; --line: #3a3d42; --accent: #8ab4f8; --on-accent: #0b1a33;
+  --picked: #1f2c44; --warn: #ff8a80; --ok: #81c995; --ok-bg: #1e3326;
+  --warn-bg: #3b1f1d; --info-bg: #1f2c44; } }
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg); margin: 0;
+  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+a { color: var(--accent); text-underline-offset: .15em; }
 :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
 .skip { position: absolute; left: -999px; }
-.skip:focus { left: 1rem; top: 1rem; background: var(--bg); padding: .5rem; }
-nav ul { list-style: none; padding: 0; display: flex; flex-wrap: wrap;
-  gap: .25rem 1rem; }
-table { border-collapse: collapse; width: 100%; }
-th, td { text-align: left; padding: .35rem .5rem;
-  border-bottom: 1px solid var(--line); vertical-align: top; }
-fieldset { border: 1px solid var(--line); border-radius: 6px;
-  margin: 1rem 0; }
+.skip:focus { left: 1rem; top: .5rem; z-index: 10; background: var(--bg);
+  padding: .5rem .75rem; border-radius: var(--radius); }
+header { border-bottom: 1px solid var(--line); background: var(--surface); }
+header nav, main { max-width: 64rem; margin: 0 auto; padding: 0 1rem; }
+nav ul { list-style: none; margin: 0; padding: 0; display: flex;
+  flex-wrap: wrap; gap: .25rem; align-items: center; }
+nav .brand { font-weight: 700; margin-right: auto; padding: .7rem 0; }
+nav a { display: inline-block; padding: .7rem .75rem; text-decoration: none;
+  border-bottom: 3px solid transparent; }
+nav a[aria-current=page] { border-bottom-color: var(--accent);
+  color: var(--fg); font-weight: 600; }
+main { padding-bottom: 3rem; }
+h1 { font-size: 1.6rem; line-height: 1.25; margin: 1.5rem 0 .75rem; }
+h2 { font-size: 1.15rem; margin: 1.75rem 0 .5rem; }
 .muted { color: var(--muted); }
 .error { color: var(--warn); }
-.notice { background: var(--card); padding: .75rem 1rem; border-radius: 6px; }
-button { font: inherit; padding: .4rem .9rem; margin: .25rem .5rem .25rem 0;
-  cursor: pointer; }
-input[type=text] { font: inherit; width: min(30rem, 100%); }
+.notice { background: var(--info-bg); padding: .75rem 1rem;
+  border-radius: var(--radius); border-left: 4px solid var(--accent); }
+.panel { background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: .75rem 1rem; }
+.panel ul { margin: .25rem 0; padding-left: 1.25rem; }
+.cards { list-style: none; padding: 0; margin: 1rem 0; display: grid;
+  gap: .75rem; grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr)); }
+.card { display: flex; flex-direction: column; gap: .15rem; height: 100%;
+  padding: .85rem 1rem; border: 1px solid var(--line);
+  border-radius: var(--radius); background: var(--surface);
+  text-decoration: none; color: var(--fg); }
+.card:hover { border-color: var(--accent); }
+.card .count { font-size: 1.75rem; font-weight: 700; line-height: 1.1; }
+.card .label { color: var(--muted); }
+.btn, button { font: inherit; display: inline-flex; align-items: center;
+  gap: .4rem; min-height: 2.5rem; padding: .45rem 1rem; cursor: pointer;
+  border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--surface); color: var(--fg); text-decoration: none; }
+.btn:hover, button:hover { border-color: var(--accent); }
+.primary { background: var(--accent); border-color: var(--accent);
+  color: var(--on-accent); font-weight: 600; }
+.primary:hover { filter: brightness(1.08); }
+.toolbar { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center;
+  margin: 1rem 0; }
+.toolbar form { margin: 0; }
+.badge { display: inline-block; padding: .1rem .6rem; border-radius: 999px;
+  font-size: .85rem; font-weight: 600; background: var(--surface);
+  border: 1px solid var(--line); }
+.badge.applied { background: var(--ok-bg); color: var(--ok);
+  border-color: transparent; }
+.badge.changed, .badge.missing { background: var(--warn-bg);
+  color: var(--warn); border-color: transparent; }
+.badge.pending { background: var(--info-bg); border-color: transparent; }
+code { font-size: .9em; overflow-wrap: anywhere; }
+fieldset { border: 1px solid var(--line); border-radius: var(--radius);
+  margin: 1rem 0; padding: .75rem 1rem 1rem; }
+legend { font-weight: 600; padding: 0 .35rem; }
+input[type=text] { font: inherit; width: min(32rem, 100%); padding: .45rem .6rem;
+  border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--bg); color: var(--fg); }
+input[type=checkbox] { width: 1.3rem; height: 1.3rem; margin: 0;
+  accent-color: var(--accent); cursor: pointer; vertical-align: middle; }
 label { cursor: pointer; }
-.genres li { margin: .2rem 0; }
+.chips { list-style: none; padding: 0; margin: .25rem 0 .75rem;
+  display: flex; flex-wrap: wrap; gap: .5rem; }
+.chip { display: inline-flex; align-items: center; gap: .5rem;
+  padding: .4rem .8rem .4rem .6rem; border: 1px solid var(--line);
+  border-radius: 999px; background: var(--bg); }
+.chip:has(input:checked) { background: var(--picked);
+  border-color: var(--accent); }
+.chip .score { color: var(--muted); font-size: .85rem; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: .5rem .6rem; vertical-align: top;
+  border-bottom: 1px solid var(--line); }
+.list tbody tr:nth-child(even) { background: var(--stripe); }
+.list tbody tr:hover { background: var(--surface); }
+.list tbody tr:has(input:checked) { background: var(--picked); }
+.list thead th { position: sticky; top: 0; z-index: 1; background: var(--bg);
+  box-shadow: inset 0 -2px var(--line); border-bottom: 0; }
+.list td.pick, .list th.pick { width: 3rem; text-align: center; }
+.list td.pick { padding: 0; }
+.list .fill { display: block; margin: -.5rem -.6rem; padding: .5rem .6rem;
+  min-height: 100%; }
+.list td.pick .fill { margin: 0; padding: .65rem .6rem; }
+.actions { position: sticky; bottom: 0; z-index: 2; background: var(--bg);
+  display: flex; flex-wrap: wrap; gap: .5rem 1rem; align-items: center;
+  padding: .75rem 0; border-top: 1px solid var(--line); margin-top: .5rem; }
+.pager { display: flex; gap: 1rem; margin: 1rem 0; }
+details { margin: 1rem 0; }
+summary { cursor: pointer; font-weight: 600; padding: .25rem 0; }
+@media (max-width: 40rem) {
+  h1 { font-size: 1.35rem; }
+  .list thead { position: absolute; width: 1px; height: 1px; overflow: hidden;
+    clip-path: inset(50%); }
+  .list, .list tbody { display: block; }
+  .list tr { display: grid; grid-template-columns: 1fr; gap: .15rem;
+    padding: .6rem .5rem; border-bottom: 1px solid var(--line); }
+  .list.pickable tr { grid-template-columns: 2.75rem 1fr; }
+  .list td { display: block; border: 0; padding: 0; }
+  .list.pickable td:not(.pick) { grid-column: 2; }
+  .list td.pick { grid-row: 1 / span 3; width: auto; }
+  .list td[data-label]::before { content: attr(data-label) ": ";
+    color: var(--muted); font-size: .85rem; }
+  .list .fill { display: inline; margin: 0; padding: 0; }
+  nav .brand { flex-basis: 100%; padding-bottom: 0; }
+  nav a { padding: .45rem .55rem; }
+}
 """
 
 
@@ -83,6 +177,19 @@ def serve(reviewer) -> None:
 def esc(value) -> str:
     """HTML-escape any value."""
     return html.escape(str(value), quote=True)
+
+
+def human_time(stamp) -> str:
+    """ISO UTC timestamp as 'MM/DD/YYYY h:mm AM UTC' ('' if missing)."""
+    if not stamp:
+        return ""
+    try:
+        moment = datetime.fromisoformat(stamp)
+    except ValueError:
+        return esc(stamp)
+    hour = moment.hour % 12 or 12
+    return (f"{moment:%m/%d/%Y} {hour}:{moment:%M} "
+            f"{'AM' if moment.hour < 12 else 'PM'} UTC")
 
 
 def genre_list(genres) -> str:
@@ -147,10 +254,7 @@ class Handler(BaseHTTPRequestHandler):
             f"initial-scale=1\"><title>{esc(title)} - Genre review</title>"
             f"<style>{STYLE}</style></head><body>"
             "<a class=\"skip\" href=\"#main\">Skip to content</a>"
-            "<header><nav aria-label=\"Main\"><ul>"
-            "<li><a href=\"/\">Overview</a></li>"
-            "<li><a href=\"/next\">Next album</a></li>"
-            "<li><a href=\"/bulk\">Bulk accept</a></li>"
+            f"<header><nav aria-label=\"Main\"><ul>{self.nav_links()}"
             "</ul></nav></header>"
             f"<main id=\"main\">{body}</main></body></html>"
         ).encode("utf-8")
@@ -164,6 +268,19 @@ class Handler(BaseHTTPRequestHandler):
                          "form-action 'self'; frame-ancestors 'none'")
         self.end_headers()
         self.wfile.write(page)
+
+    def nav_links(self) -> str:
+        """Main navigation, marking the current page for screen readers."""
+        path = urlsplit(self.path).path
+        links = [("/", "Overview"), ("/albums?filter=pending",
+                                     "Waiting for review"),
+                 ("/next", "Next album"), ("/bulk", "Bulk accept")]
+        items = ["<li class=\"brand\">Genre review</li>"]
+        for href, label in links:
+            current = ' aria-current="page"' \
+                if href.split("?")[0] == path else ""
+            items.append(f"<li><a href=\"{href}\"{current}>{label}</a></li>")
+        return "".join(items)
 
     def redirect(self, location: str) -> None:
         """303 redirect after a form post."""
@@ -259,9 +376,10 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             connection.close()
         counts["nosuggest"] = nosuggest
-        rows = "".join(
-            f"<tr><td><a href=\"/albums?filter={key}\">{esc(label)}</a></td>"
-            f"<td>{counts.get(key, 0)}</td></tr>"
+        cards = "".join(
+            f"<li><a class=\"card\" href=\"/albums?filter={key}\">"
+            f"<span class=\"count\">{counts.get(key, 0)}</span>"
+            f"<span class=\"label\">{esc(label)}</span></a></li>"
             for key, label in FILTERS.items())
         status = self.reviewer.status
         notice = f"<p class=\"notice\" role=\"status\">{esc(message)}</p>" \
@@ -270,17 +388,17 @@ class Handler(BaseHTTPRequestHandler):
             "<p class=\"error\">LASTFM_API_KEY is not set, so no "
             "suggestions can be fetched.</p>")
         self.send_page("Overview", (
-            f"<h1>Genre review</h1>{notice}{key_note}"
-            "<table><caption class=\"muted\">Albums by status</caption>"
-            f"<thead><tr><th scope=\"col\">Status</th><th scope=\"col\">"
-            f"Albums</th></tr></thead><tbody>{rows}</tbody></table>"
-            f"<h2>Background work</h2><ul><li>Last scan: "
-            f"{esc(status['scan'])}</li><li>Last.fm lookups: "
-            f"{esc(status['suggest'])}</li><li>Albums still waiting for a "
-            f"Last.fm lookup: {waiting}</li></ul>"
+            f"<h1>Overview</h1>{notice}{key_note}"
+            "<h2 id=\"by-status\">Albums by status</h2>"
+            f"<ul class=\"cards\" aria-labelledby=\"by-status\">{cards}</ul>"
+            "<div class=\"toolbar\"><a class=\"btn primary\" href=\"/next\">"
+            "Review the next album</a>"
             f"<form method=\"post\" action=\"/scan\">{self.token_field()}"
             "<button type=\"submit\">Scan the library now</button></form>"
-            "<p><a href=\"/next\">Review the next album</a></p>"))
+            "</div><h2>Background work</h2><div class=\"panel\"><ul>"
+            f"<li>Last scan: {esc(status['scan'])}</li><li>Last.fm lookups: "
+            f"{esc(status['suggest'])}</li><li>Albums still waiting for a "
+            f"Last.fm lookup: {waiting}</li></ul></div>"))
 
     def album_list(self, name: str, page_text: str, tick_all: bool = False,
                    message: str = "") -> None:
@@ -311,23 +429,18 @@ class Handler(BaseHTTPRequestHandler):
         for row in rows:
             title = (f"{esc(row['albumartist'] or 'Unknown artist')} - "
                      f"{esc(row['album'])}")
-            cells = (f"<td><a href=\"/album/{row['id']}\">{title}</a></td>"
-                     f"<td>{genre_list(store.loads(row['current_genres'], []))}"
-                     "</td>")
-            if approvable:
-                genres = default_genres(
-                    row["status"], store.loads(row["suggestions"], None),
-                    store.loads(row["applied_genres"], None), limit)
-                if genres:
-                    box = (f"<input type=\"checkbox\" name=\"album\" "
-                           f"value=\"{row['id']}\" id=\"a{row['id']}\""
-                           f"{' checked' if tick_all else ''} aria-label=\""
-                           f"Approve {title}\">")
-                else:
-                    box = '<span class="muted">-</span>'
-                cells = (f"<td>{box}</td>{cells}<td>{genre_list(genres)}"
-                         "</td>")
-            items.append(f"<tr>{cells}</tr>")
+            now = genre_list(store.loads(row["current_genres"], []))
+            if not approvable:
+                items.append(
+                    f"<tr><td><a href=\"/album/{row['id']}\">{title}</a></td>"
+                    f"<td data-label=\"Now\">{now}</td></tr>")
+                continue
+            genres = default_genres(
+                row["status"], store.loads(row["suggestions"], None),
+                store.loads(row["applied_genres"], None), limit)
+            items.append(self.pick_row(
+                row["id"], title, now, genres, tick_all,
+                "Albums without suggestions need their own page"))
         columns = 4 if approvable else 2
         body_rows = "".join(items) or (
             f"<tr><td colspan=\"{columns}\">No albums here.</td></tr>")
@@ -340,36 +453,73 @@ class Handler(BaseHTTPRequestHandler):
                       "Next page</a>")
         notice = f"<p class=\"notice\" role=\"status\">{esc(message)}</p>" \
             if message else ""
-        head = ("<th scope=\"col\">Album</th><th scope=\"col\">Genres in "
-                "the files</th>")
         if approvable:
             toggle = {"filter": name, "page": page}
             if not tick_all:
                 toggle["tick"] = "all"
-            head = ("<th scope=\"col\">Approve</th>" + head
-                    + "<th scope=\"col\">Will become</th>")
-        table = (f"<table><thead><tr>{head}</tr></thead>"
-                 f"<tbody>{body_rows}</tbody></table>")
-        if approvable:
+            toggle_link = (f"<a href=\"/albums?{urlencode(toggle)}\">"
+                           f"{'Untick all' if tick_all else 'Tick all on this page'}"
+                           "</a>")
             content = (
                 "<p>Tick albums to approve them with the genres shown under "
                 "<em>Will become</em> (the ones their album page would "
-                "tick). Albums without suggestions need their own page.</p>"
-                f"<p><a href=\"/albums?{urlencode(toggle)}\">"
-                f"{'Untick all' if tick_all else 'Tick all on this page'}"
-                "</a></p>"
+                "tick). Click anywhere on a row except the album name to "
+                "tick it. Albums without suggestions need their own page.</p>"
+                f"<p>{toggle_link}</p>"
                 f"<form method=\"post\" action=\"/approve\">"
                 f"{self.token_field()}"
                 f"<input type=\"hidden\" name=\"filter\" value=\"{esc(name)}\">"
                 f"<input type=\"hidden\" name=\"page\" value=\"{page}\">"
-                + table
-                + "<button type=\"submit\">Write genres for the ticked "
-                "albums</button></form>")
+                + self.pick_table(body_rows, "Genres in the files")
+                + "<div class=\"actions\"><button type=\"submit\" "
+                "class=\"primary\">Write genres for the ticked albums</button>"
+                f"{toggle_link}</div></form>")
         else:
-            content = table
+            content = (
+                "<table class=\"list\"><thead><tr><th scope=\"col\">Album"
+                "</th><th scope=\"col\">Genres in the files</th></tr></thead>"
+                f"<tbody>{body_rows}</tbody></table>")
         self.send_page(FILTERS[name], (
             f"<h1>{esc(FILTERS[name])}</h1>{notice}<p>{total} albums.</p>"
-            f"{content}<p>{pages}</p>"))
+            f"{content}<p class=\"pager\">{pages}</p>"))
+
+    @staticmethod
+    def pick_row(album_id: int, title: str, now: str, genres, ticked: bool,
+                 no_pick: str) -> str:
+        """One tickable list row.
+
+        Every cell except the album link is a label for the checkbox, so a
+        click anywhere on the row ticks it (no JavaScript needed).
+        """
+        if not genres:
+            return (f"<tr><td class=\"pick\"><span class=\"muted\" "
+                    f"title=\"{esc(no_pick)}\">-</span></td>"
+                    f"<td data-label=\"Album\"><a href=\"/album/{album_id}\">"
+                    f"{title}</a></td><td data-label=\"Now\">{now}</td>"
+                    "<td data-label=\"Will become\"><span class=\"muted\">"
+                    "needs its own page</span></td></tr>")
+        box_id = f"a{album_id}"
+        return (
+            f"<tr><td class=\"pick\"><label class=\"fill\" for=\"{box_id}\">"
+            f"<input type=\"checkbox\" name=\"album\" value=\"{album_id}\" "
+            f"id=\"{box_id}\"{' checked' if ticked else ''} aria-label=\""
+            f"Approve {title}\"></label></td>"
+            f"<td data-label=\"Album\"><a href=\"/album/{album_id}\">{title}"
+            f"</a></td><td data-label=\"Now\"><label class=\"fill\" "
+            f"for=\"{box_id}\">{now}</label></td>"
+            f"<td data-label=\"Will become\"><label class=\"fill\" "
+            f"for=\"{box_id}\">{genre_list(genres)}</label></td></tr>")
+
+    @staticmethod
+    def pick_table(body_rows: str, now_heading: str) -> str:
+        """Table wrapper for pick_row rows."""
+        return (
+            "<table class=\"list pickable\"><thead><tr>"
+            "<th scope=\"col\" class=\"pick\">Approve</th>"
+            "<th scope=\"col\">Album</th>"
+            f"<th scope=\"col\">{esc(now_heading)}</th>"
+            "<th scope=\"col\">Will become</th></tr></thead>"
+            f"<tbody>{body_rows}</tbody></table>")
 
     @staticmethod
     def filter_sql(name: str):
@@ -447,12 +597,12 @@ class Handler(BaseHTTPRequestHandler):
         ticked = default_genres(album["status"], suggestions, applied,
                                 settings.max_genres)
         choices = "".join(
-            f"<li><label><input type=\"checkbox\" name=\"genre\" "
-            f"value=\"{esc(item['name'])}\""
+            f"<li><label class=\"chip\"><input type=\"checkbox\" "
+            f"name=\"genre\" value=\"{esc(item['name'])}\""
             f"{' checked' if item['name'] in ticked else ''}> "
-            f"{esc(item['name'])}</label> <span class=\"muted\">"
-            f"(score {item['weight']}, from "
-            f"{esc(', '.join(item['sources']))})</span></li>"
+            f"<span>{esc(item['name'])}</span> <span class=\"score\">"
+            f"score {item['weight']}, from "
+            f"{esc(', '.join(item['sources']))}</span></label></li>"
             for item in suggestions or [])
         listed = {item["name"] for item in suggestions or []}
         extra = ", ".join(name for name in ticked if name not in listed)
@@ -476,7 +626,7 @@ class Handler(BaseHTTPRequestHandler):
         token = self.token_field()
         status_text = {
             "pending": "Waiting for review",
-            "applied": "Applied " + esc(album["applied_at"] or ""),
+            "applied": "Applied " + human_time(album["applied_at"]),
             "skipped": "Skipped", "ignored": "Never ask again",
             "changed": "Changed since approval (or some files could not "
                        "be written)",
@@ -493,24 +643,26 @@ class Handler(BaseHTTPRequestHandler):
         self.send_page(f"{album['albumartist']} - {album['album']}", (
             f"<h1>{esc(album['albumartist'] or 'Unknown artist')} - "
             f"{esc(album['album'])}</h1>{notice}"
-            f"<p>Status: {status_text}. Folder: <code>"
-            f"{esc(album['folder'] or '(library root)')}</code>. "
-            f"{len(tracks)} {'track' if len(tracks) == 1 else 'tracks'}.</p>"
+            f"<p><span class=\"badge {album['status']}\">{status_text}</span>"
+            f" <span class=\"muted\">{len(tracks)} "
+            f"{'track' if len(tracks) == 1 else 'tracks'} in</span> <code>"
+            f"{esc(album['folder'] or '(library root)')}</code></p>"
             f"<p>Genres in the files now: {genre_list(current)}</p>"
             f"<form method=\"post\" action=\"/album/{album_id}/apply\">"
             f"{token}<fieldset><legend>Genres to write (up to "
             f"{settings.max_genres} are ticked by default)</legend>{lookup}"
-            f"<ul class=\"genres\">{choices}</ul>"
+            f"<ul class=\"chips\">{choices}</ul>"
             "<p><label for=\"extra\">Other genres, separated by commas:"
             "</label><br><input type=\"text\" id=\"extra\" name=\"extra\" "
             f"value=\"{esc(extra)}\" autocomplete=\"off\"></p></fieldset>"
-            "<button type=\"submit\">Write these genres</button></form>"
+            "<button type=\"submit\" class=\"primary\">Write these genres"
+            "</button></form><div class=\"toolbar\">"
             f"<form method=\"post\" action=\"/album/{album_id}/skip\">{token}"
             "<button type=\"submit\">Skip for now</button></form>"
             f"<form method=\"post\" action=\"/album/{album_id}/"
             f"{ignore_action}\">{token}<button type=\"submit\">"
-            f"{ignore_label}</button></form>{revert}"
-            "<details><summary>Tracks</summary><table><thead><tr>"
+            f"{ignore_label}</button></form>{revert}</div>"
+            "<details><summary>Tracks</summary><table class=\"list\"><thead><tr>"
             "<th scope=\"col\">File</th><th scope=\"col\">Genres</th></tr>"
             f"</thead><tbody>{track_rows}</tbody></table></details>"))
 
@@ -610,12 +762,12 @@ class Handler(BaseHTTPRequestHandler):
         settings = self.reviewer.settings
         candidates = self.bulk_candidates()
         rows = "".join(
-            f"<tr><td><input type=\"checkbox\" name=\"album\" "
-            f"value=\"{row['id']}\" id=\"a{row['id']}\" checked></td>"
-            f"<td><label for=\"a{row['id']}\">"
-            f"{esc(row['albumartist'])} - {esc(row['album'])}</label></td>"
-            f"<td>{genre_list(store.loads(row['current_genres'], []))}</td>"
-            f"<td>{genre_list(genres)}</td></tr>"
+            self.pick_row(
+                row["id"],
+                f"{esc(row['albumartist'] or 'Unknown artist')} - "
+                f"{esc(row['album'])}",
+                genre_list(store.loads(row["current_genres"], [])),
+                genres, True, "")
             for row, genres in candidates)
         if not candidates:
             body = ("<h1>Bulk accept</h1><p>No waiting album has a "
@@ -630,11 +782,10 @@ class Handler(BaseHTTPRequestHandler):
                 f"until you press the button. At most {BULK_LIMIT} albums "
                 "are shown at a time.</p>"
                 f"<form method=\"post\" action=\"/bulk\">{self.token_field()}"
-                "<table><thead><tr><th scope=\"col\">Write</th>"
-                "<th scope=\"col\">Album</th><th scope=\"col\">Now</th>"
-                "<th scope=\"col\">Will become</th></tr></thead>"
-                f"<tbody>{rows}</tbody></table><button type=\"submit\">"
-                "Write genres for the ticked albums</button></form>")
+                + self.pick_table(rows, "Now")
+                + "<div class=\"actions\"><button type=\"submit\" "
+                "class=\"primary\">Write genres for the ticked albums"
+                "</button></div></form>")
         self.send_page("Bulk accept", body)
 
     def bulk_apply(self, form) -> None:
