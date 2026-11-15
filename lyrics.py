@@ -248,39 +248,63 @@ def write_new(target: Path, text: str) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+# Text patterns for a quick SQL pre-filter of tracks with embedded lyrics;
+# has_embedded() then confirms on the few rows that match.
+EMBEDDED_LIKE = ('%"USLT:%', '%"SYLT:%', '%"LYRICS"%', '%"SYNCEDLYRICS"%',
+                 '%"UNSYNCEDLYRICS"%', '%"\u00a9lyr"%', '%"©lyr"%')
+
+
 def coverage(connection: sqlite3.Connection, root: Path) -> dict:
     """Per-track lyrics state and library totals.
 
     Returns {"tracks": {path: state}, "totals": {state: count}} where state
     is synced-file, plain-file, embedded, instrumental, not-found, error or
-    unchecked.
+    unchecked. Each album folder is listed once instead of checking every
+    possible sidecar file separately.
     """
     looked_up = {row["path"]: row["status"] for row in connection.execute(
         "SELECT path, status FROM lyrics")}
+    likes = " OR ".join("lower(fields) LIKE lower(?)" for _ in EMBEDDED_LIKE)
+    embedded = {row["path"] for row in connection.execute(
+        f"SELECT path, fields FROM tracks WHERE fields IS NOT NULL AND "
+        f"({likes})", EMBEDDED_LIKE)
+        if has_embedded(store.loads(row["fields"], {}))}
+    folders = {}
     states = {}
-    for row in connection.execute("SELECT path, fields FROM tracks"):
-        path = root / row["path"]
-        synced, plain = sidecars(path)
-        if synced.exists():
+    for (relative,) in connection.execute("SELECT path FROM tracks"):
+        folder, _, name = relative.rpartition("/")
+        if folder not in folders:
+            try:
+                with os.scandir(root / folder) as entries:
+                    folders[folder] = {entry.name for entry in entries}
+            except OSError:
+                folders[folder] = set()
+        names = folders[folder]
+        stem = name.rsplit(".", 1)[0] if "." in name else name
+        if stem + SYNCED_EXT in names:
             state = "synced-file"
-        elif plain.exists():
+        elif stem + PLAIN_EXT in names:
             state = "plain-file"
-        elif has_embedded(store.loads(row["fields"], {})):
+        elif relative in embedded:
             state = "embedded"
         else:
             state = {"instrumental": "instrumental",
                      "notfound": "not-found",
-                     "error": "error"}.get(looked_up.get(row["path"]),
+                     "error": "error"}.get(looked_up.get(relative),
                                            "unchecked")
-        states[row["path"]] = state
+        states[relative] = state
     totals = {}
     for state in states.values():
         totals[state] = totals.get(state, 0) + 1
     return {"tracks": states, "totals": totals}
 
 
-def due(connection: sqlite3.Connection, root: Path, only_new=False) -> list:
-    """Tracks to look up: no lyrics yet, and not tried recently."""
+def due(connection: sqlite3.Connection, root: Path, only_new=False,
+        cover=None) -> list:
+    """Tracks to look up: no lyrics yet, and not tried recently.
+
+    cover is a coverage() result to reuse, when the caller has one.
+    """
     now = datetime.now(timezone.utc)
     retry = {
         "notfound": (now - timedelta(days=NOT_FOUND_RETRY_DAYS)).isoformat(),
@@ -289,8 +313,9 @@ def due(connection: sqlite3.Connection, root: Path, only_new=False) -> list:
     checked = {row["path"]: (row["status"], row["checked_at"])
                for row in connection.execute(
                    "SELECT path, status, checked_at FROM lyrics")}
+    cover = cover or coverage(connection, root)
     result = []
-    for path, state in sorted(coverage(connection, root)["tracks"].items()):
+    for path, state in sorted(cover["tracks"].items()):
         if state not in ("unchecked", "not-found", "error"):
             continue
         if path in checked:

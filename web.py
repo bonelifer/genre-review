@@ -1052,7 +1052,7 @@ class Handler(BaseHTTPRequestHandler):
         connection = self.db()
         try:
             cover = lyrics.coverage(connection, root)
-            due = len(lyrics.due(connection, root))
+            due = len(lyrics.due(connection, root, cover=cover))
             written = connection.execute(
                 "SELECT COUNT(*) FROM lyrics WHERE written_file IS NOT NULL"
             ).fetchone()[0]
