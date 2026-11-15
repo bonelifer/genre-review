@@ -13,6 +13,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlencode, urlsplit
 
+import lyrics
 import store
 import suggest
 import tags
@@ -276,7 +277,7 @@ class Handler(BaseHTTPRequestHandler):
         links = [("/", "Overview"), ("/albums?filter=pending",
                                      "Waiting for review"),
                  ("/next", "Next album"), ("/bulk", "Bulk accept"),
-                 ("/tags", "Tags")]
+                 ("/tags", "Tags"), ("/lyrics", "Lyrics")]
         items = ["<li class=\"brand\">Genre review</li>"]
         for href, label in links:
             current = ' aria-current="page"' \
@@ -336,6 +337,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.bulk_preview()
         if url.path == "/tags":
             return self.tags_page(query.get("msg", [""])[0])
+        if url.path == "/lyrics":
+            return self.lyrics_page(query.get("msg", [""])[0])
         if url.path == "/tags/field":
             return self.tag_field_page(query.get("name", [""])[0])
         match = re.fullmatch(r"/album/(\d+)", url.path)
@@ -358,6 +361,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.bulk_apply(form)
         if path == "/approve":
             return self.approve_ticked(form)
+        if path in ("/lyrics/fill", "/lyrics/stop", "/lyrics/remove"):
+            return self.lyrics_action(path.rsplit("/", 1)[1], form)
         if path in ("/tags/rules", "/tags/apply", "/tags/restore"):
             return self.tag_action(path.rsplit("/", 1)[1], form)
         match = re.fullmatch(r"/album/(\d+)/restore-tags", path)
@@ -1028,3 +1033,118 @@ class Handler(BaseHTTPRequestHandler):
                 return self.redirect("/tags")
             message = self.reviewer.start_tag_job("restore", field)
         self.redirect("/tags?" + urlencode({"msg": message}))
+
+    # --- lyrics ---------------------------------------------------------------
+
+    LYRIC_STATES = (
+        ("synced-file", "Synced lyrics file (.lrc)"),
+        ("plain-file", "Plain lyrics file (.txt)"),
+        ("embedded", "Lyrics in the tags"),
+        ("instrumental", "Instrumental"),
+        ("not-found", "Not on LRCLIB"),
+        ("error", "Lookup failed"),
+        ("unchecked", "Not looked up yet"),
+    )
+
+    def lyrics_page(self, message: str) -> None:
+        """Lyrics coverage, the fill job and albums still missing lyrics."""
+        root = self.reviewer.settings.library_dir
+        connection = self.db()
+        try:
+            cover = lyrics.coverage(connection, root)
+            due = len(lyrics.due(connection, root))
+            written = connection.execute(
+                "SELECT COUNT(*) FROM lyrics WHERE written_file IS NOT NULL"
+            ).fetchone()[0]
+            albums = {row["path"]: row for row in connection.execute(
+                "SELECT tracks.path, albums.id, albums.albumartist, "
+                "albums.album FROM tracks JOIN albums ON albums.id = "
+                "tracks.album_id")}
+        finally:
+            connection.close()
+        totals = cover["totals"]
+        cards = "".join(
+            f"<li><div class=\"card\"><span class=\"count\">"
+            f"{totals.get(key, 0)}</span><span class=\"label\">"
+            f"{esc(label)}</span></div></li>"
+            for key, label in self.LYRIC_STATES)
+        missing = {}
+        for path, state in cover["tracks"].items():
+            if state in ("not-found", "error", "unchecked") and path in albums:
+                row = albums[path]
+                entry = missing.setdefault(row["id"], [row, 0])
+                entry[1] += 1
+        worst = sorted(missing.values(), key=lambda item: (
+            -item[1], (item[0]["albumartist"] or "").casefold()))[:100]
+        album_rows = "".join(
+            f"<tr><td><a href=\"/album/{row['id']}\">"
+            f"{esc(row['albumartist'] or 'Unknown artist')} - "
+            f"{esc(row['album'])}</a></td><td data-label=\"Missing\">"
+            f"{count}</td></tr>" for row, count in worst) or (
+            "<tr><td colspan=\"2\">Every album has lyrics.</td></tr>")
+        token = self.token_field()
+        running = self.reviewer.lyrics_lock.locked()
+        minutes = round(due * lyrics.PAUSE * 1.5 / 60)
+        if running:
+            control = (f"<form method=\"post\" action=\"/lyrics/stop\">"
+                       f"{token}<button type=\"submit\">Stop the fill"
+                       "</button></form>")
+        elif due:
+            control = (f"<form method=\"post\" action=\"/lyrics/fill\">"
+                       f"{token}<button type=\"submit\" class=\"primary\">"
+                       f"Fill missing lyrics ({due} tracks)</button></form>")
+        else:
+            control = "<p>Nothing is due for a lookup right now.</p>"
+        remove = "" if not written else (
+            f"<h2>Undo</h2><form method=\"post\" action=\"/lyrics/remove\">"
+            f"{token}<p>genre-review has written {written} lyrics files. "
+            "Removing them deletes only files that are still exactly as "
+            "written.</p><p><label><input type=\"checkbox\" name=\"confirm\" "
+            "value=\"yes\"> Yes, delete the lyrics files genre-review wrote"
+            "</label></p><button type=\"submit\">Remove written lyrics files"
+            "</button></form>")
+        auto = ("New tracks are looked up automatically after each scan (up "
+                f"to {self.reviewer.settings.lyrics_auto_limit} per scan)."
+                if self.reviewer.settings.lyrics_auto_fill else
+                "New tracks are only looked up when you press the button "
+                "(set LYRICS_AUTO_FILL=1 to do it after each scan).")
+        notice = f"<p class=\"notice\" role=\"status\">{esc(message)}</p>" \
+            if message else ""
+        self.send_page("Lyrics", (
+            f"<h1>Lyrics</h1>{notice}"
+            "<p>Tracks without lyrics are looked up on <a href=\"https://"
+            "lrclib.net/\">LRCLIB</a>. Synced lyrics are saved as a "
+            "<code>.lrc</code> file beside the track, plain lyrics as "
+            "<code>.txt</code>, which is where myMPD and most players look. "
+            "Existing lyrics are never replaced. Tracks LRCLIB doesn't have "
+            f"are tried again after {lyrics.NOT_FOUND_RETRY_DAYS} days.</p>"
+            f"<h2 id=\"coverage\">Coverage</h2><ul class=\"cards\" "
+            f"aria-labelledby=\"coverage\">{cards}</ul>"
+            f"<div class=\"panel\"><p>Last fill: "
+            f"{esc(self.reviewer.status['lyrics'])}</p>"
+            + (f"<p class=\"muted\">{due} tracks are due; at LRCLIB's "
+               f"requested pace that takes about {minutes} minutes.</p>"
+               if due and not running else "")
+            + f"<p class=\"muted\">{esc(auto)}</p>"
+            f"<div class=\"toolbar\">{control}</div></div>"
+            "<h2>Albums still missing lyrics</h2><table class=\"list\">"
+            "<thead><tr><th scope=\"col\">Album</th><th scope=\"col\">"
+            f"Tracks without lyrics</th></tr></thead><tbody>{album_rows}"
+            f"</tbody></table>{remove}"))
+
+    def lyrics_action(self, action: str, form) -> None:
+        """Start or stop the fill, or remove written files."""
+        if action == "fill":
+            message = self.reviewer.start_lyrics_job()
+        elif action == "stop":
+            message = self.reviewer.stop_lyrics_job()
+        elif form.get("confirm", [""])[0] != "yes":
+            message = ("Nothing removed: tick the box to confirm deleting "
+                       "the lyrics files.")
+        else:
+            result = self.reviewer.remove_lyrics_files()
+            message = result.get("error") or (
+                f"Removed {result['removed']} lyrics files."
+                + (f" Kept {result['kept']} that were changed since."
+                   if result["kept"] else ""))
+        self.redirect("/lyrics?" + urlencode({"msg": message}))

@@ -21,6 +21,7 @@ from pathlib import Path
 
 import lastfm
 import library
+import lyrics
 import mpd
 import store
 import suggest
@@ -43,6 +44,8 @@ class Settings:
     mpd_port: int
     mpd_password: str
     mpd_path_prefix: str
+    lyrics_auto_fill: bool = False
+    lyrics_auto_limit: int = 300
 
     @property
     def db_path(self) -> Path:
@@ -62,6 +65,16 @@ def env_int(name: str, default: int, minimum: int, maximum: int) -> int:
     if not minimum <= value <= maximum:
         raise SystemExit(f"{name} must be between {minimum} and {maximum}")
     return value
+
+
+def env_flag(name: str) -> bool:
+    """Read a yes/no setting (1/0, true/false, yes/no, on/off)."""
+    raw = os.environ.get(name, "").strip().lower()
+    if raw in ("", "0", "false", "no", "off"):
+        return False
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    raise SystemExit(f"{name} must be 1 or 0, got {raw!r}")
 
 
 def load_settings(args) -> Settings:
@@ -87,6 +100,8 @@ def load_settings(args) -> Settings:
         mpd_port=env_int("MPD_PORT", 6600, 1, 65535),
         mpd_password=os.environ.get("MPD_PASSWORD", ""),
         mpd_path_prefix=os.environ.get("MPD_PATH_PREFIX", "").strip("/"),
+        lyrics_auto_fill=env_flag("LYRICS_AUTO_FILL"),
+        lyrics_auto_limit=env_int("LYRICS_AUTO_LIMIT", 300, 1, 100000),
     )
 
 
@@ -100,8 +115,13 @@ class Reviewer:
         # Scans and tag writes never run at the same time.
         self.library_lock = threading.Lock()
         self.status = {"scan": "not run yet", "suggest": "not run yet",
-                       "tags": "nothing removed or restored yet"}
+                       "tags": "nothing removed or restored yet",
+                       "lyrics": "not run yet"}
         self.tag_job = None
+        self.lyrics_job = None
+        self.lyrics_stop = threading.Event()
+        # One fill at a time, whether started from the page or the timer.
+        self.lyrics_lock = threading.Lock()
 
     def connect(self) -> sqlite3.Connection:
         """New connection to the state database (one per thread)."""
@@ -314,6 +334,71 @@ class Reviewer:
                 return note
         return ""
 
+    # --- lyrics fill -------------------------------------------------------
+
+    def start_lyrics_job(self, limit: int = 0, only_new: bool = False) -> str:
+        """Start filling missing lyrics from LRCLIB in the background."""
+        if self.lyrics_lock.locked():
+            return "The lyrics fill is already running."
+        self.lyrics_stop.clear()
+        self.lyrics_job = threading.Thread(
+            target=self.fill_lyrics, args=(limit, only_new), daemon=True)
+        self.lyrics_job.start()
+        return "Filling lyrics in the background."
+
+    def stop_lyrics_job(self) -> str:
+        """Ask a running lyrics fill to stop after the current track."""
+        if not self.lyrics_lock.locked():
+            return "The lyrics fill is not running."
+        self.lyrics_stop.set()
+        return "Stopping the lyrics fill after the current track."
+
+    def fill_lyrics(self, limit: int = 0, only_new: bool = False) -> dict:
+        """Look up missing lyrics (at most limit tracks; 0 = all due)."""
+        if not self.lyrics_lock.acquire(blocking=False):
+            return {}
+        connection = self.connect()
+        try:
+            paths = lyrics.due(connection, self.settings.library_dir,
+                               only_new=only_new)
+            if limit:
+                paths = paths[:limit]
+
+            def progress(done, total, found):
+                self.status["lyrics"] = (f"running: track {done} of {total},"
+                                         f" {found} lyrics files written")
+
+            result = lyrics.fill(connection, self.settings.library_dir,
+                                 paths, stop=self.lyrics_stop,
+                                 progress=progress)
+        except Exception as error:  # shown on the Lyrics page
+            self.status["lyrics"] = f"failed: {error}"
+            return {}
+        finally:
+            connection.close()
+            self.lyrics_lock.release()
+        message = (f"{store.now_iso()}: {result['synced']} synced and "
+                   f"{result['plain']} plain lyrics files written, "
+                   f"{result['instrumental']} instrumental, "
+                   f"{result['notfound']} not on LRCLIB, "
+                   f"{result['error']} errors")
+        if result["reason"]:
+            message += f" ({result['reason']})"
+        self.status["lyrics"] = message
+        return result
+
+    def remove_lyrics_files(self) -> dict:
+        """Delete lyrics files genre-review wrote (unchanged ones only)."""
+        if self.lyrics_lock.locked():
+            return {"removed": 0, "kept": 0,
+                    "error": "Stop the lyrics fill first."}
+        connection = self.connect()
+        try:
+            return lyrics.remove_written(connection,
+                                         self.settings.library_dir)
+        finally:
+            connection.close()
+
     def background_loop(self, stop: threading.Event) -> None:
         """Scan, then suggest, every scan_interval_minutes (0 = once)."""
         while not stop.is_set():
@@ -321,6 +406,9 @@ class Reviewer:
                 self.scan()
                 self.suggest_missing()
                 self.warm_tag_cache()
+                if self.settings.lyrics_auto_fill:
+                    self.fill_lyrics(self.settings.lyrics_auto_limit,
+                                     only_new=True)
             except Exception as error:  # keep the web page alive
                 self.log(f"background pass failed: {error}")
                 self.status["scan"] = f"failed: {error}"

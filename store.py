@@ -18,7 +18,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 STATUSES = ("pending", "applied", "skipped", "ignored", "changed", "missing")
 
 SCHEMA = """
@@ -80,6 +80,22 @@ CREATE INDEX removed_tags_open ON removed_tags (field, restored_at);
 CREATE INDEX removed_tags_path ON removed_tags (path);
 """
 
+# Schema 3: lyrics fill.
+#   lyrics   one row per track that was looked up on LRCLIB: what was
+#            found, when, and the sidecar file written (with its SHA-256,
+#            so "remove written files" never deletes a file edited since).
+MIGRATION_3 = """
+CREATE TABLE lyrics (
+    path TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    lrclib_id INTEGER,
+    written_file TEXT,
+    written_sha256 TEXT,
+    checked_at TEXT NOT NULL
+);
+CREATE INDEX lyrics_status ON lyrics (status);
+"""
+
 
 def now_iso() -> str:
     """Current UTC time as an ISO 8601 string (storage format)."""
@@ -100,7 +116,7 @@ def connect(path: Path) -> sqlite3.Connection:
             f"{path} was written by a newer genre-review "
             f"(schema {version}, this version knows {SCHEMA_VERSION})."
         )
-    for target, script in ((1, SCHEMA), (2, MIGRATION_2)):
+    for target, script in ((1, SCHEMA), (2, MIGRATION_2), (3, MIGRATION_3)):
         if version < target:
             with transaction(connection):
                 # Another process may have migrated while we waited.

@@ -25,6 +25,7 @@ from mutagen.id3 import APIC, ID3, TPUB, TXXX  # noqa: E402
 import genre_review  # noqa: E402
 import lastfm  # noqa: E402
 import library  # noqa: E402
+import lyrics  # noqa: E402
 import mpd  # noqa: E402
 import store  # noqa: E402
 import suggest  # noqa: E402
@@ -825,7 +826,8 @@ class TagTests(unittest.TestCase):
         upgraded = store.connect(path)
         try:
             self.assertEqual(upgraded.execute(
-                "PRAGMA user_version").fetchone()[0], 2)
+                "PRAGMA user_version").fetchone()[0], store.SCHEMA_VERSION)
+            upgraded.execute("SELECT COUNT(*) FROM lyrics")
             columns = {row[1] for row in upgraded.execute(
                 "PRAGMA table_info(tracks)")}
             self.assertIn("fields", columns)
@@ -903,6 +905,264 @@ class TagPageTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, 403)
 
 
+class FakeLrclib:
+    """Answers LRCLIB requests from a dict: (endpoint, title) -> reply."""
+
+    def __init__(self, replies):
+        self.replies = replies
+        self.calls = []
+
+    def opener(self, request, timeout):
+        from urllib.parse import parse_qs, urlsplit
+        url = urlsplit(request.full_url)
+        params = {k: v[0] for k, v in parse_qs(url.query).items()}
+        endpoint = url.path.rsplit("/", 1)[1]
+        self.calls.append((endpoint, params))
+        self.agent = request.get_header("User-agent")
+        reply = self.replies.get((endpoint, params.get("track_name")))
+        if isinstance(reply, Exception):
+            raise reply
+        if reply is None:
+            raise HTTPError(request.full_url, 404, "Not Found", {},
+                            io.BytesIO(b"{}"))
+        return FakeResponse(json.dumps(reply).encode())
+
+    def client(self):
+        return lyrics.Lrclib(opener=self.opener, sleep=lambda _: None)
+
+
+SYNCED = {"id": 1, "duration": 0, "syncedLyrics": "[00:01.00] la\r\n",
+          "plainLyrics": "la", "instrumental": False}
+
+
+class LyricsTests(unittest.TestCase):
+    """LRCLIB lookups, sidecar files, coverage and undo."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name) / "library"
+        self.db = store.connect(Path(self.temp.name) / "db.sqlite")
+
+    def tearDown(self):
+        self.db.close()
+        self.temp.cleanup()
+
+    def track(self, name, title, artist="Artist", album="Album"):
+        path = self.root / "A" / name
+        make_mp3(path, artist=artist, album=album)
+        tags_ = EasyID3(path)
+        tags_["title"] = title
+        tags_.save()
+        return path
+
+    def scan(self):
+        library.scan(self.db, self.root, log=lambda _: None)
+
+    def test_name_cleaning(self):
+        self.assertEqual(lyrics.clean_name("Song (2013 Remaster)"), "Song")
+        self.assertEqual(lyrics.clean_name("Song - Remastered 2011"), "Song")
+        self.assertEqual(lyrics.clean_name("Song (Live)"), "Song (Live)")
+        self.assertEqual(lyrics.clean_name("Song (feat. X)"), "Song")
+        self.assertEqual(lyrics.primary_artist("A/B"), "A")
+        self.assertEqual(lyrics.primary_artist("A feat. B"), "A")
+
+    def test_fill_writes_synced_plain_and_records_the_rest(self):
+        one = self.track("01.mp3", "One")
+        two = self.track("02.mp3", "Two")
+        self.track("03.mp3", "Three")
+        four = self.track("04.mp3", "Four")
+        self.scan()
+        fake = FakeLrclib({
+            ("get", "One"): SYNCED,
+            ("get", "Two"): {"id": 2, "syncedLyrics": None,
+                             "plainLyrics": "words", "instrumental": False},
+            ("get", "Four"): {"id": 4, "instrumental": True,
+                              "syncedLyrics": None, "plainLyrics": None},
+        })
+        paths = lyrics.due(self.db, self.root)
+        self.assertEqual(len(paths), 4)
+        counts = lyrics.fill(self.db, self.root, paths, client=fake.client())
+        self.assertEqual((counts["synced"], counts["plain"],
+                          counts["instrumental"], counts["notfound"]),
+                         (1, 1, 1, 1))
+        self.assertEqual(one.with_suffix(".lrc").read_text(),
+                         "[00:01.00] la\n")
+        self.assertEqual(two.with_suffix(".txt").read_text(), "words\n")
+        self.assertFalse(four.with_suffix(".lrc").exists())
+        self.assertIn("genre-review", fake.agent)
+        totals = lyrics.coverage(self.db, self.root)["totals"]
+        self.assertEqual(totals, {"synced-file": 1, "plain-file": 1,
+                                  "not-found": 1, "instrumental": 1})
+        self.assertEqual(lyrics.due(self.db, self.root), [])
+
+    def test_existing_lyrics_are_never_replaced_or_looked_up(self):
+        one = self.track("01.mp3", "One")
+        one.with_suffix(".txt").write_text("mine")
+        self.scan()
+        self.assertEqual(lyrics.due(self.db, self.root), [])
+        with self.assertRaises(FileExistsError):
+            lyrics.write_new(one.with_suffix(".txt"), "theirs")
+        self.assertEqual(one.with_suffix(".txt").read_text(), "mine")
+
+    def test_embedded_lyrics_count_as_present(self):
+        from mutagen.id3 import USLT
+        one = self.track("01.mp3", "One")
+        id3 = ID3(one)
+        id3.add(USLT(encoding=3, lang="eng", desc="", text="la"))
+        id3.save(one)
+        self.scan()
+        self.assertEqual(lyrics.coverage(self.db, self.root)["totals"],
+                         {"embedded": 1})
+
+    def test_fallbacks_clean_names_then_search_by_duration(self):
+        self.track("01.mp3", "Song (2013 Remaster)", artist="A/B")
+        self.scan()
+        fake = FakeLrclib({("search", "Song"): [
+            {"id": 7, "duration": 999, "syncedLyrics": "[00:01.00] far"},
+            {"id": 8, "duration": 0, "syncedLyrics": None,
+             "plainLyrics": "near"},
+            {"id": 9, "duration": 1, "syncedLyrics": "[00:01.00] best"}]})
+        lyrics.fill(self.db, self.root, lyrics.due(self.db, self.root),
+                    client=fake.client())
+        self.assertEqual([call[0] for call in fake.calls],
+                         ["get", "get", "search"])
+        self.assertEqual(fake.calls[1][1]["track_name"], "Song")
+        self.assertEqual(fake.calls[1][1]["artist_name"], "A")
+        written = (self.root / "A/01.lrc").read_text()
+        self.assertEqual(written, "[00:01.00] best\n")
+
+    def test_live_take_gets_plain_lyrics_from_another_length(self):
+        self.track("01.mp3", "Song (Live at Anaheim, 1975)")
+        self.scan()
+        fake = FakeLrclib({("search", "Song"): [
+            {"id": 3, "duration": 250, "instrumental": False,
+             "syncedLyrics": "[00:10.00] first line\n[00:12.00] second",
+             "plainLyrics": None}]})
+        counts = lyrics.fill(self.db, self.root,
+                             lyrics.due(self.db, self.root),
+                             client=fake.client())
+        self.assertEqual(counts["plain"], 1)
+        self.assertEqual([c[1]["track_name"] for c in fake.calls[-2:]],
+                         ["Song (Live at Anaheim, 1975)", "Song"])
+        self.assertEqual((self.root / "A/01.txt").read_text(),
+                         "first line\nsecond\n")
+        self.assertFalse((self.root / "A/01.lrc").exists())
+
+    def test_untagged_file_uses_its_file_name(self):
+        path = self.root / "A/1.01 Eagles - The Long Run (2013 Remaster).mp3"
+        path.parent.mkdir(parents=True)
+        path.write_bytes((b"\xff\xfb\x90\x64" + bytes(413)) * 3)
+        info = lyrics.track_info(path)
+        self.assertEqual((info["artist"], info["title"]),
+                         ("Eagles", "The Long Run (2013 Remaster)"))
+
+    def test_rate_limit_stops_the_fill(self):
+        self.track("01.mp3", "One")
+        self.scan()
+        busy = HTTPError("u", 429, "Too Many", {"Retry-After": "1"},
+                         io.BytesIO(b""))
+        fake = FakeLrclib({("get", "One"): busy})
+        counts = lyrics.fill(self.db, self.root,
+                             lyrics.due(self.db, self.root),
+                             client=fake.client())
+        self.assertIn("429", counts["reason"])
+        self.assertEqual(len(fake.calls), lyrics.ATTEMPTS)
+
+    def test_not_found_is_retried_only_after_the_waiting_period(self):
+        self.track("01.mp3", "One")
+        self.scan()
+        lyrics.fill(self.db, self.root, lyrics.due(self.db, self.root),
+                    client=FakeLrclib({}).client())
+        self.assertEqual(lyrics.due(self.db, self.root), [])
+        self.db.execute("UPDATE lyrics SET checked_at = '2000-01-01'")
+        self.assertEqual(len(lyrics.due(self.db, self.root)), 1)
+        self.assertEqual(lyrics.due(self.db, self.root, only_new=True), [])
+
+    def test_deleted_written_file_is_fetched_again_on_a_manual_fill(self):
+        one = self.track("01.mp3", "One")
+        self.scan()
+        fake = FakeLrclib({("get", "One"): SYNCED})
+        lyrics.fill(self.db, self.root, lyrics.due(self.db, self.root),
+                    client=fake.client())
+        one.with_suffix(".lrc").unlink()
+        self.assertEqual(lyrics.due(self.db, self.root, only_new=True), [])
+        self.assertEqual(len(lyrics.due(self.db, self.root)), 1)
+
+    def test_remove_written_keeps_edited_files(self):
+        one = self.track("01.mp3", "One")
+        two = self.track("02.mp3", "Two")
+        self.scan()
+        fake = FakeLrclib({("get", "One"): SYNCED, ("get", "Two"): SYNCED})
+        lyrics.fill(self.db, self.root, lyrics.due(self.db, self.root),
+                    client=fake.client())
+        two.with_suffix(".lrc").write_text("edited by hand")
+        result = lyrics.remove_written(self.db, self.root)
+        self.assertEqual(result, {"removed": 1, "kept": 1})
+        self.assertFalse(one.with_suffix(".lrc").exists())
+        self.assertTrue(two.with_suffix(".lrc").exists())
+
+
+class LyricsPageTests(unittest.TestCase):
+    """The Lyrics page with LRCLIB faked."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        base = Path(self.temp.name)
+        self.root = base / "library"
+        self.track = self.root / "A/Album/01.mp3"
+        make_mp3(self.track)
+        tags_ = EasyID3(self.track)
+        tags_["title"] = "One"
+        tags_.save()
+        settings = genre_review.Settings(
+            library_dir=self.root, state_dir=base / "state",
+            lastfm_api_key="", listen="127.0.0.1", port=0,
+            scan_interval_minutes=0, max_genres=3, bulk_min_weight=60,
+            mpd_host="127.0.0.1", mpd_port=1, mpd_password="",
+            mpd_path_prefix="")
+        self.reviewer = genre_review.Reviewer(settings, log=lambda _: None)
+        self.reviewer.scan()
+        self.fake = FakeLrclib({("get", "One"): SYNCED})
+        self.original = lyrics.Lrclib
+        lyrics.Lrclib = lambda: self.original(opener=self.fake.opener,
+                                              sleep=lambda _: None)
+        self.server = web.ReviewServer(("127.0.0.1", 0), self.reviewer)
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+        threading.Thread(target=self.server.serve_forever,
+                         daemon=True).start()
+
+    def tearDown(self):
+        lyrics.Lrclib = self.original
+        self.server.shutdown()
+        self.server.server_close()
+        self.temp.cleanup()
+
+    def get(self, path):
+        with urlopen(self.base + path, timeout=10) as response:
+            return response.read().decode()
+
+    def post(self, path, fields):
+        request = Request(self.base + path, urlencode(fields).encode(),
+                          method="POST")
+        with urlopen(request, timeout=10) as response:
+            return response.url
+
+    def test_fill_and_remove_through_the_page(self):
+        body = self.get("/lyrics")
+        self.assertIn("Fill missing lyrics (1 tracks)", body)
+        self.post("/lyrics/fill", {"token": self.server.token})
+        self.reviewer.lyrics_job.join(10)
+        self.assertTrue(self.track.with_suffix(".lrc").exists())
+        self.assertIn("1 synced", self.reviewer.status["lyrics"])
+        url = self.post("/lyrics/remove", {"token": self.server.token})
+        self.assertIn("tick+the+box", url)
+        self.assertTrue(self.track.with_suffix(".lrc").exists())
+        url = self.post("/lyrics/remove", {"token": self.server.token,
+                                           "confirm": "yes"})
+        self.assertIn("Removed+1+lyrics+files", url)
+        self.assertFalse(self.track.with_suffix(".lrc").exists())
+
+
 class CliTests(unittest.TestCase):
     """No command prints help; settings are validated."""
 
@@ -917,6 +1177,16 @@ class CliTests(unittest.TestCase):
         with self.assertRaises(SystemExit) as caught:
             genre_review.main(["scan"])
         self.assertIn("LIBRARY_DIR", str(caught.exception))
+
+    def test_flag_setting(self):
+        os.environ["LYRICS_AUTO_FILL"] = "maybe"
+        try:
+            with self.assertRaises(SystemExit):
+                genre_review.env_flag("LYRICS_AUTO_FILL")
+            os.environ["LYRICS_AUTO_FILL"] = "yes"
+            self.assertTrue(genre_review.env_flag("LYRICS_AUTO_FILL"))
+        finally:
+            del os.environ["LYRICS_AUTO_FILL"]
 
     def test_bad_number_setting(self):
         os.environ["MAX_GENRES"] = "lots"
