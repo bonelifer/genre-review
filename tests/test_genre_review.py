@@ -154,6 +154,18 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["album"], "Loose")
 
+    def test_untagged_disc_folders_are_named_from_parent_folders(self):
+        make_mp3(self.root / "Eagles/The Long Run (1979)/CD 1/01.mp3",
+                 artist="", album="")
+        make_mp3(self.root / "Eagles/The Long Run (1979)/CD 2/01.mp3",
+                 artist="", album="")
+        self.scan()
+        rows = self.db.execute("SELECT albumartist, album, folder FROM "
+                               "albums").fetchall()
+        self.assertEqual([tuple(row) for row in rows],
+                         [("Eagles", "The Long Run",
+                           "Eagles/The Long Run (1979)")])
+
     def test_unchanged_files_are_not_read_again(self):
         make_mp3(self.root / "A/Album/01.mp3")
         self.scan()
@@ -620,6 +632,12 @@ class WebTests(unittest.TestCase):
         db.close()
         self.assertEqual(self.reviewer.suggest_missing(), 1)
         self.assertEqual(looked_up, [1])
+
+    def test_next_prefers_albums_that_were_looked_up(self):
+        make_mp3(self.root / "0/First/01.mp3", artist="0", album="First")
+        self.reviewer.scan()
+        with urlopen(self.base + "/next", timeout=10) as response:
+            self.assertTrue(response.url.endswith("/album/1"))
 
     def test_clean_genres(self):
         self.assertEqual(web.clean_genres(["Rock,  Pop ", "rock"]),

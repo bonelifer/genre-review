@@ -11,6 +11,7 @@ field per value.
 """
 
 import os
+import re
 import sqlite3
 from pathlib import Path
 
@@ -20,6 +21,8 @@ import store
 
 AUDIO_EXTENSIONS = {".mp3", ".flac", ".ogg", ".oga", ".opus", ".m4a"}
 SEPARATOR = "\x1f"
+DISC_FOLDER = re.compile(r"(cd|disc|disk)\s*\d+", re.IGNORECASE)
+TRAILING_YEAR = re.compile(r"\s*\(\d{4}\)$")
 
 
 class TagError(Exception):
@@ -53,6 +56,21 @@ def read_track(path: Path) -> dict:
         "album": first(tags, "album"),
         "genres": genres,
     }
+
+
+def fill_from_folders(track: dict, folder: Path) -> None:
+    """Name an untagged track's album and artist after its folders.
+
+    'Artist/Album (1979)/CD 1/01.mp3' becomes album 'Album', artist
+    'Artist' (an existing artist tag wins), grouped by 'Artist/Album (1979)'.
+    """
+    if DISC_FOLDER.fullmatch(folder.name):
+        folder = folder.parent
+    track["folder"] = folder.as_posix()
+    track["album"] = TRAILING_YEAR.sub("", folder.name) or folder.name \
+        or "(no album)"
+    if not track["albumartist"]:
+        track["albumartist"] = folder.parent.name
 
 
 def album_key(albumartist: str, album: str, folder: str) -> str:
@@ -122,8 +140,11 @@ def scan(connection: sqlite3.Connection, root: Path, log=print) -> dict:
     walk_errors = []
     for relative, info in audio_files(root, walk_errors):
         old = known.get(relative)
+        # Folder-named (untagged) tracks are always re-read, so naming
+        # changes reach them; they are rare.
         if old and old["mtime_ns"] == info.st_mtime_ns \
-                and old["size"] == info.st_size:
+                and old["size"] == info.st_size \
+                and not old["album_key"].startswith("folder:"):
             seen[relative] = cached_track(old)
             continue
         try:
@@ -137,11 +158,10 @@ def scan(connection: sqlite3.Connection, root: Path, log=print) -> dict:
                 seen[relative] = cached_track(old)
             continue
         read += 1
-        folder = Path(relative).parent.as_posix()
-        track["album_key"] = album_key(track["albumartist"], track["album"],
-                                       folder)
         if not track["album"]:
-            track["album"] = Path(folder).name or "(no album)"
+            fill_from_folders(track, Path(relative).parent)
+        track["album_key"] = album_key(track["albumartist"], track["album"],
+                                       track.pop("folder", ""))
         track.update(mtime_ns=info.st_mtime_ns, size=info.st_size)
         seen[relative] = track
 
