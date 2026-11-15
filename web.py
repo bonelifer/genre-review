@@ -15,6 +15,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 
 import store
 import suggest
+import tags
 
 PAGE_SIZE = 100
 BULK_LIMIT = 200
@@ -274,7 +275,8 @@ class Handler(BaseHTTPRequestHandler):
         path = urlsplit(self.path).path
         links = [("/", "Overview"), ("/albums?filter=pending",
                                      "Waiting for review"),
-                 ("/next", "Next album"), ("/bulk", "Bulk accept")]
+                 ("/next", "Next album"), ("/bulk", "Bulk accept"),
+                 ("/tags", "Tags")]
         items = ["<li class=\"brand\">Genre review</li>"]
         for href, label in links:
             current = ' aria-current="page"' \
@@ -332,6 +334,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.go_next(None)
         if url.path == "/bulk":
             return self.bulk_preview()
+        if url.path == "/tags":
+            return self.tags_page(query.get("msg", [""])[0])
+        if url.path == "/tags/field":
+            return self.tag_field_page(query.get("name", [""])[0])
         match = re.fullmatch(r"/album/(\d+)", url.path)
         if match:
             return self.album_page(int(match.group(1)),
@@ -352,6 +358,18 @@ class Handler(BaseHTTPRequestHandler):
             return self.bulk_apply(form)
         if path == "/approve":
             return self.approve_ticked(form)
+        if path in ("/tags/rules", "/tags/apply", "/tags/restore"):
+            return self.tag_action(path.rsplit("/", 1)[1], form)
+        match = re.fullmatch(r"/album/(\d+)/restore-tags", path)
+        if match:
+            result = self.reviewer.restore_album_tags(int(match.group(1)))
+            text = f"Restored tags in {result['files']} files."
+            if result["errors"]:
+                text += " Failed: " + "; ".join(result["errors"][:3])
+            if result.get("mpd"):
+                text += " " + result["mpd"]
+            return self.redirect(f"/album/{match.group(1)}?"
+                                 + urlencode({"msg": text}))
         match = re.fullmatch(r"/album/(\d+)/(apply|skip|ignore|revert|"
                              r"unignore)", path)
         if not match:
@@ -636,6 +654,22 @@ class Handler(BaseHTTPRequestHandler):
                   f"{token}<button type=\"submit\">Revert to the genres from "
                   "before</button></form>") \
             if album["status"] in ("applied", "changed") else ""
+        connection = self.db()
+        try:
+            removed = tags.removed_for_album(connection, album_id)
+        finally:
+            connection.close()
+        removed_section = ""
+        if removed:
+            items = "".join(
+                f"<li>{esc(tags.describe(field))} <span class=\"muted\">"
+                f"({count} {'file' if count == 1 else 'files'})</span></li>"
+                for field, count in removed)
+            removed_section = (
+                "<h2>Tags removed by the cleanup</h2><div class=\"panel\">"
+                f"<ul>{items}</ul><form method=\"post\" action=\"/album/"
+                f"{album_id}/restore-tags\">{token}<button type=\"submit\">"
+                "Restore these tags</button></form></div>")
         ignore_action = "unignore" if album["status"] == "ignored" \
             else "ignore"
         ignore_label = "Ask about this album again" \
@@ -661,7 +695,7 @@ class Handler(BaseHTTPRequestHandler):
             "<button type=\"submit\">Skip for now</button></form>"
             f"<form method=\"post\" action=\"/album/{album_id}/"
             f"{ignore_action}\">{token}<button type=\"submit\">"
-            f"{ignore_label}</button></form>{revert}</div>"
+            f"{ignore_label}</button></form>{revert}</div>{removed_section}"
             "<details><summary>Tracks</summary><table class=\"list\"><thead><tr>"
             "<th scope=\"col\">File</th><th scope=\"col\">Genres</th></tr>"
             f"</thead><tbody>{track_rows}</tbody></table></details>"))
@@ -852,3 +886,145 @@ class Handler(BaseHTTPRequestHandler):
             message += (f" MPD was not told about {mpd_failed} albums "
                         f"({mpd_message}); run an MPD library update.")
         return message
+
+    # --- tag inventory and cleanup -----------------------------------------
+
+    def tags_page(self, message: str) -> None:
+        """Every tag field in the library, removal rules and preview."""
+        connection = self.db()
+        try:
+            fields = tags.inventory(connection)
+            rules = tags.rule_fields(connection)
+            targets = tags.affected(connection, rules)
+            pending = connection.execute(
+                "SELECT COUNT(*) FROM tracks WHERE fields IS NULL"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        token = self.token_field()
+        notice = f"<p class=\"notice\" role=\"status\">{esc(message)}</p>" \
+            if message else ""
+        scanning = (f"<p class=\"muted\">{pending} files have not been "
+                    "read for tags yet; the next scan adds them.</p>"
+                    if pending else "")
+        rows = []
+        for item in fields:
+            field = item["field"]
+            if item["files"] == 0:
+                continue
+            if item["protected"]:
+                pick = "<span class=\"badge\" title=\"Never removed\">kept</span>"
+            elif not item["mp3"]:
+                pick = ("<span class=\"muted\" title=\"Only MP3 files can "
+                        "be cleaned\">-</span>")
+            else:
+                box_id = f"f{len(rows)}"
+                pick = (f"<label class=\"fill\" for=\"{box_id}\"><input "
+                        f"type=\"checkbox\" name=\"field\" id=\"{box_id}\" "
+                        f"value=\"{esc(field)}\"{' checked' if item['rule'] else ''}"
+                        f" aria-label=\"Remove {esc(item['name'])}\"></label>")
+            mp3_note = "" if item["mp3"] == item["files"] else (
+                f" <span class=\"muted\">({item['mp3']} MP3)</span>")
+            examples = esc("; ".join(item["examples"])) or \
+                "<span class=\"muted\">-</span>"
+            rows.append(
+                f"<tr><td class=\"pick\">{pick}</td>"
+                f"<td data-label=\"Field\">{esc(item['name'])}<br>"
+                f"<code class=\"muted\">{esc(field)}</code></td>"
+                f"<td data-label=\"Files\">{item['files']}{mp3_note}</td>"
+                f"<td data-label=\"Albums\"><a href=\"/tags/field?"
+                f"{urlencode({'name': field})}\">{item['albums']}</a></td>"
+                f"<td data-label=\"Examples\">{examples}</td></tr>")
+        table = (
+            "<table class=\"list pickable\"><thead><tr>"
+            "<th scope=\"col\" class=\"pick\">Remove</th>"
+            "<th scope=\"col\">Field</th><th scope=\"col\">Files</th>"
+            "<th scope=\"col\">Albums</th><th scope=\"col\">Examples</th>"
+            f"</tr></thead><tbody>{''.join(rows)}</tbody></table>")
+        album_count = len({album for _, album in targets})
+        if rules and targets:
+            preview = (
+                f"<p>{len(rules)} {'field is' if len(rules) == 1 else 'fields are'}"
+                f" marked for removal. They are in <strong>{len(targets)} MP3 "
+                f"files</strong> across <strong>{album_count} albums</strong>."
+                " Every removed tag is saved, so it can be restored.</p>"
+                f"<form method=\"post\" action=\"/tags/apply\">{token}"
+                "<button type=\"submit\" class=\"primary\">Remove these "
+                "tags from the files</button></form>")
+        elif rules:
+            preview = ("<p>The fields marked for removal are not in any MP3 "
+                       "file right now.</p>")
+        else:
+            preview = ("<p>No fields are marked for removal. Tick fields "
+                       "below and save.</p>")
+        removed = [item for item in fields if item["removed"]]
+        restore_rows = "".join(
+            f"<tr><td>{esc(item['name'])}<br><code class=\"muted\">"
+            f"{esc(item['field'])}</code></td><td>{item['removed']}</td><td>"
+            f"<form method=\"post\" action=\"/tags/restore\">{token}"
+            f"<input type=\"hidden\" name=\"field\" value=\"{esc(item['field'])}\">"
+            f"<button type=\"submit\">Restore</button></form></td></tr>"
+            for item in removed)
+        restore = (
+            "<h2>Removed tags</h2><table class=\"list\"><thead><tr>"
+            "<th scope=\"col\">Field</th><th scope=\"col\">Files</th>"
+            "<th scope=\"col\">Undo</th></tr></thead>"
+            f"<tbody>{restore_rows}</tbody></table>") if removed else ""
+        self.send_page("Tags", (
+            f"<h1>Tags</h1>{notice}"
+            "<p>Every tag field found in the library. Tick the ones you want "
+            "gone and save; nothing changes in the files until you press "
+            "<em>Remove these tags from the files</em>. Fields marked "
+            "<em>kept</em> (titles, artists, album, track numbers, dates, "
+            "genres, cover art, ReplayGain and MusicBrainz IDs) can't be "
+            "removed. Only MP3 files are cleaned.</p>"
+            f"<p class=\"muted\">Last tag job: "
+            f"{esc(self.reviewer.status['tags'])}</p>{scanning}"
+            f"<div class=\"panel\">{preview}</div>"
+            f"<h2>Fields</h2><form method=\"post\" action=\"/tags/rules\">"
+            f"{token}{table}<div class=\"actions\"><button type=\"submit\" "
+            "class=\"primary\">Save removal choices</button></div></form>"
+            f"{restore}"))
+
+    def tag_field_page(self, field: str) -> None:
+        """Albums carrying one tag field."""
+        if not field or len(field) > 300:
+            return self.not_found()
+        connection = self.db()
+        try:
+            rows = tags.albums_with(connection, field)
+        finally:
+            connection.close()
+        items = "".join(
+            f"<tr><td><a href=\"/album/{row['id']}\">"
+            f"{esc(row['albumartist'] or 'Unknown artist')} - "
+            f"{esc(row['album'])}</a></td><td data-label=\"Tracks\">"
+            f"{row['tracks']}</td></tr>" for row in rows) or (
+            "<tr><td colspan=\"2\">No album has this field now.</td></tr>")
+        self.send_page(tags.describe(field), (
+            f"<h1>{esc(tags.describe(field))}</h1><p><code>{esc(field)}"
+            f"</code> is in {len(rows)} albums. <a href=\"/tags\">Back to "
+            "Tags</a></p><table class=\"list\"><thead><tr><th scope=\"col\">"
+            "Album</th><th scope=\"col\">Tracks with it</th></tr></thead>"
+            f"<tbody>{items}</tbody></table>"))
+
+    def tag_action(self, action: str, form) -> None:
+        """Save rules, start removal, or start a field restore."""
+        if action == "rules":
+            connection = self.db()
+            try:
+                chosen = [value for value in form.get("field", [])
+                          if 0 < len(value) <= 300]
+                tags.save_rules(connection, chosen)
+                count = len(tags.rule_fields(connection))
+            finally:
+                connection.close()
+            message = f"Saved: {count} fields marked for removal."
+        elif action == "apply":
+            message = self.reviewer.start_tag_job("apply")
+        else:
+            field = form.get("field", [""])[0]
+            if not field:
+                return self.redirect("/tags")
+            message = self.reviewer.start_tag_job("restore", field)
+        self.redirect("/tags?" + urlencode({"msg": message}))
