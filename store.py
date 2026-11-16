@@ -116,14 +116,22 @@ def now_iso() -> str:
 
 
 def display_time(moment: datetime) -> str:
-    """A UTC datetime as 'MM/DD/YYYY h:mm AM UTC' (display format)."""
-    hour = moment.hour % 12 or 12
-    return (f"{moment:%m/%d/%Y} {hour}:{moment:%M} "
-            f"{'AM' if moment.hour < 12 else 'PM'} UTC")
+    """A stored UTC time shown in local time: 'MM/DD/YYYY h:mm AM CST'.
+
+    The local zone comes from the TZ environment variable (UTC when it is
+    not set). Times without a zone are taken as UTC, the storage zone.
+    """
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    local = moment.astimezone()
+    hour = local.hour % 12 or 12
+    zone = local.tzname() or "UTC"
+    return (f"{local:%m/%d/%Y} {hour}:{local:%M} "
+            f"{'AM' if local.hour < 12 else 'PM'} {zone}")
 
 
 def now_display() -> str:
-    """Current UTC time in the display format, for status lines."""
+    """Current time in the display format, for status lines."""
     return display_time(datetime.now(timezone.utc))
 
 

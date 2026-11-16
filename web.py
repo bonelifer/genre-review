@@ -32,8 +32,12 @@ FILTERS = {
 ORDER = "albumartist COLLATE NOCASE, album COLLATE NOCASE, id"
 # Lists whose albums can be ticked and approved together.
 APPROVABLE = ("pending", "changed", "skipped")
-# Theme picker choices: "auto" follows the system's light/dark setting.
+# Theme choices: "auto" follows the system's light/dark setting.
 THEMES = {"auto": "Auto", "light": "Light", "dark": "Dark"}
+THEME_TEXT = {"auto": "Auto (follows your system)", "light": "Light",
+              "dark": "Dark"}
+# The theme button steps through the choices in this order.
+NEXT_THEME = {"auto": "light", "light": "dark", "dark": "auto"}
 
 # Colors follow myMPD's look: its gray panels and the green highlight
 # (#28a745). Links use a lighter or darker green so text stays readable,
@@ -71,12 +75,23 @@ nav .brand { font-weight: 700; margin-right: auto; padding: .7rem 0; }
 nav a { display: inline-block; padding: .7rem .75rem; text-decoration: none;
   border-bottom: 3px solid transparent; color: var(--fg); }
 nav a:hover { border-bottom-color: var(--line); }
-.theme { display: flex; align-items: center; gap: .4rem; margin: 0;
-  padding: .35rem 0 .35rem .5rem; }
-.theme select { font: inherit; min-height: 2.25rem; padding: .25rem .4rem;
-  border: 1px solid var(--line); border-radius: var(--radius);
-  background: var(--bg); color: var(--fg); }
-.theme button { min-height: 2.25rem; padding: .25rem .75rem; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip-path: inset(50%); white-space: nowrap; }
+/* Theme button: a half white, half black circle. The tooltip shows on
+   hover and on keyboard focus (CSS only; the page has no JavaScript). */
+.theme { position: relative; margin: 0; padding: .3rem 0 .3rem .25rem; }
+.theme button { width: 2.5rem; height: 2.5rem; min-height: 0; padding: 0;
+  justify-content: center; border-radius: 50%; background: transparent;
+  border-color: transparent; }
+.theme button:hover { border-color: var(--line); }
+.theme-icon { width: 1.5rem; height: 1.5rem; border-radius: 50%;
+  border: 2px solid var(--fg);
+  background: linear-gradient(90deg, #fff 50%, #000 50%); }
+.theme .tip { position: absolute; right: 0; top: calc(100% + .1rem);
+  z-index: 5; width: max-content; max-width: 16rem; padding: .3rem .6rem;
+  border-radius: var(--radius); background: var(--fg); color: var(--bg);
+  font-size: .85rem; line-height: 1.3; visibility: hidden; }
+.theme:hover .tip, .theme button:focus-visible + .tip { visibility: visible; }
 nav a[aria-current=page] { border-bottom-color: var(--accent);
   color: var(--fg); font-weight: 600; }
 main { padding-bottom: 3rem; }
@@ -222,7 +237,7 @@ def esc(value) -> str:
 
 
 def human_time(stamp) -> str:
-    """ISO UTC timestamp as 'MM/DD/YYYY h:mm AM UTC' ('' if missing)."""
+    """Stored ISO UTC timestamp in local display format ('' if missing)."""
     if not stamp:
         return ""
     try:
@@ -332,16 +347,23 @@ class Handler(BaseHTTPRequestHandler):
         return "".join(items)
 
     def theme_form(self, theme: str) -> str:
-        """Header form to pick Auto, Light or Dark colors."""
-        options = "".join(
-            f"<option value=\"{value}\""
-            f"{' selected' if value == theme else ''}>{label}</option>"
-            for value, label in THEMES.items())
+        """Header button that steps through Auto, Light and Dark colors.
+
+        Each click saves the next choice. Screen readers hear the current
+        choice and what the click does; the tooltip shows the same to
+        mouse and keyboard users.
+        """
+        current = THEME_TEXT[theme]
+        following = NEXT_THEME[theme]
+        action = f"Click for {THEMES[following]}."
         return (f"<form class=\"theme\" method=\"post\" action=\"/theme\">"
                 f"{self.token_field()}<input type=\"hidden\" name=\"back\" "
-                f"value=\"{esc(self.path)}\"><label for=\"theme\">Theme"
-                f"</label><select id=\"theme\" name=\"theme\">{options}"
-                "</select><button type=\"submit\">Set</button></form>")
+                f"value=\"{esc(self.path)}\"><button type=\"submit\" "
+                f"name=\"theme\" value=\"{following}\">"
+                "<span class=\"theme-icon\" aria-hidden=\"true\"></span>"
+                f"<span class=\"sr-only\">Theme: {current}. {action}</span>"
+                f"</button><span class=\"tip\" aria-hidden=\"true\">Theme: "
+                f"{current}. {action}</span></form>")
 
     def redirect(self, location: str) -> None:
         """303 redirect after a form post."""

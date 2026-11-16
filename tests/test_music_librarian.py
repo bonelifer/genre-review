@@ -8,6 +8,7 @@ import struct
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -70,16 +71,42 @@ def genres_of(path: Path):
 
 
 class TimeFormatTests(unittest.TestCase):
-    """Times shown to the user use MM/DD/YYYY h:mm AM/PM UTC."""
+    """Times are stored in UTC and shown as MM/DD/YYYY h:mm AM/PM in TZ."""
 
-    def test_display_time(self):
+    def setUp(self):
+        self.old_tz = os.environ.get("TZ")
+
+    def tearDown(self):
+        if self.old_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = self.old_tz
+        time.tzset()
+
+    def use_zone(self, zone):
+        os.environ["TZ"] = zone
+        time.tzset()
+
+    def test_display_time_in_utc(self):
         from datetime import datetime, timezone
+        self.use_zone("UTC")
         self.assertEqual(store.display_time(datetime(
             2026, 11, 16, 9, 5, tzinfo=timezone.utc)), "11/16/2026 9:05 AM UTC")
         self.assertEqual(store.display_time(datetime(
             2026, 11, 16, 0, 30, tzinfo=timezone.utc)), "11/16/2026 12:30 AM UTC")
         self.assertEqual(web.human_time("2026-11-16T21:56:45+00:00"),
                          "11/16/2026 9:56 PM UTC")
+
+    def test_display_time_in_local_zone(self):
+        from datetime import datetime, timezone
+        self.use_zone("America/Chicago")
+        self.assertEqual(web.human_time("2026-11-16T21:56:45+00:00"),
+                         "11/16/2026 3:56 PM CST")
+        # Daylight saving time, and a stored time that crosses midnight.
+        self.assertEqual(store.display_time(datetime(
+            2026, 7, 2, 3, 0, tzinfo=timezone.utc)), "07/01/2026 10:00 PM CDT")
+        # Stored values stay UTC whatever the display zone is.
+        self.assertTrue(store.now_iso().endswith("+00:00"))
 
 
 class SuggestTests(unittest.TestCase):
@@ -583,18 +610,24 @@ class WebTests(unittest.TestCase):
         self.assertIn('value="Rock" checked', body)
         self.assertIn("1 track in", body)
 
-    def test_theme_picker_saves_and_returns_to_the_page(self):
+    def test_theme_button_steps_through_choices(self):
         _, body = self.get("/")
         self.assertIn('<html lang="en">', body)  # auto: no data-theme
-        self.assertIn('<option value="auto" selected>', body)
+        self.assertIn('name="theme" value="light"', body)
+        self.assertIn("Theme: Auto (follows your system). Click for Light.",
+                      body)
         status, url = self.post("/theme", {"token": self.server.token,
-                                           "theme": "dark",
+                                           "theme": "light",
                                            "back": "/tags?msg=x"})
         self.assertEqual(status, 200)
         self.assertTrue(url.endswith("/tags?msg=x"))
         _, body = self.get("/")
+        self.assertIn('<html lang="en" data-theme="light">', body)
+        self.assertIn('name="theme" value="dark"', body)
+        self.post("/theme", {"token": self.server.token, "theme": "dark"})
+        _, body = self.get("/")
         self.assertIn('<html lang="en" data-theme="dark">', body)
-        self.assertIn('<option value="dark" selected>', body)
+        self.assertIn('name="theme" value="auto"', body)
         # Unknown values fall back to auto; outside addresses go home.
         status, url = self.post("/theme", {"token": self.server.token,
                                            "theme": "neon",
@@ -1316,7 +1349,7 @@ class LyricsPageTests(unittest.TestCase):
         self.assertTrue(self.track.with_suffix(".lrc").exists())
         self.assertIn("1 synced", self.reviewer.status["lyrics"])
         self.assertRegex(self.reviewer.status["lyrics"],
-                         r"^\d\d/\d\d/\d{4} \d{1,2}:\d\d [AP]M UTC: ")
+                         r"^\d\d/\d\d/\d{4} \d{1,2}:\d\d [AP]M [A-Z+0-9-]+: ")
         url = self.post("/lyrics/remove", {"token": self.server.token})
         self.assertIn("tick+the+box", url)
         self.assertTrue(self.track.with_suffix(".lrc").exists())
