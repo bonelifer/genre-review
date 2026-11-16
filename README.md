@@ -36,8 +36,9 @@ then list each genre on its own.
 - **Bulk accept** previews albums whose own Last.fm tags agree strongly, so
   you can approve many at once. Nothing is written until you confirm.
 - Uses myMPD's colors: its gray panels and green highlight. It follows your
-  system's light or dark setting, and the **Theme** picker in the header can
-  fix it to Light or Dark instead.
+  system's light or dark setting. The round half-white, half-black button at
+  the right of the header steps through Auto, Light and Dark; its tooltip
+  names the current choice.
 
 ## Tag cleanup
 
@@ -149,6 +150,11 @@ tests/docker-test.sh
 This runs flake8 and the offline test suite in throwaway containers on
 Python 3.10 and the newest Python. Last.fm and MPD are faked; the tests
 write tags to tiny generated MP3 and FLAC files.
+
+`tools/header_a11y.py URL AXE_MIN_JS` checks the page header against a running
+copy: axe-core in every color mode at desktop and phone width, plus the theme
+button by keyboard. It needs Playwright for Python and a local axe-core
+(`npm install axe-core`), and leaves the theme on Auto when it finishes.
 
 ## Contributing
 

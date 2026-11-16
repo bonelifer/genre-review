@@ -583,18 +583,24 @@ class WebTests(unittest.TestCase):
         self.assertIn('value="Rock" checked', body)
         self.assertIn("1 track in", body)
 
-    def test_theme_picker_saves_and_returns_to_the_page(self):
+    def test_theme_button_steps_through_choices(self):
         _, body = self.get("/")
         self.assertIn('<html lang="en">', body)  # auto: no data-theme
-        self.assertIn('<option value="auto" selected>', body)
+        self.assertIn('name="theme" value="light"', body)
+        self.assertIn("Theme: Auto (follows your system). Click for Light.",
+                      body)
         status, url = self.post("/theme", {"token": self.server.token,
-                                           "theme": "dark",
+                                           "theme": "light",
                                            "back": "/tags?msg=x"})
         self.assertEqual(status, 200)
         self.assertTrue(url.endswith("/tags?msg=x"))
         _, body = self.get("/")
+        self.assertIn('<html lang="en" data-theme="light">', body)
+        self.assertIn('name="theme" value="dark"', body)
+        self.post("/theme", {"token": self.server.token, "theme": "dark"})
+        _, body = self.get("/")
         self.assertIn('<html lang="en" data-theme="dark">', body)
-        self.assertIn('<option value="dark" selected>', body)
+        self.assertIn('name="theme" value="auto"', body)
         # Unknown values fall back to auto; outside addresses go home.
         status, url = self.post("/theme", {"token": self.server.token,
                                            "theme": "neon",
