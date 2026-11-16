@@ -1,4 +1,4 @@
-"""Lyrics coverage and fill from LRCLIB (https://lrclib.net).
+"""Lyrics coverage and fill from LRCLIB (https://lrclib.net), then Deezer.
 
 Tracks that already have lyrics (a sidecar file next to them, or lyrics
 embedded in their tags) are left alone. For the rest, LRCLIB is asked for
@@ -15,6 +15,11 @@ exactly as music-librarian wrote them.
 Requests go one at a time with a pause between them, identify this client
 in the User-Agent, and honour Retry-After on HTTP 429, as LRCLIB asks for
 batch work.
+
+When Deezer is turned on, a second pass after LRCLIB asks Deezer (see
+deezer.py) about tracks LRCLIB had nothing for, and about tracks where
+LRCLIB only had plain lyrics: a synced Song.lrc from Deezer then replaces
+the Song.txt music-librarian wrote, if that file is still unchanged.
 """
 
 import hashlib
@@ -33,6 +38,7 @@ from urllib.request import Request, urlopen
 
 import mutagen
 
+import deezer
 import store
 
 API = "https://lrclib.net/api/"
@@ -385,13 +391,18 @@ def fill(connection: sqlite3.Connection, root: Path, paths, client=None,
             except OSError:
                 status = "error"
         counts[status] += 1
+        # An upsert, not INSERT OR REPLACE, so the Deezer columns survive
+        # a fresh LRCLIB check.
         connection.execute(
-            "INSERT OR REPLACE INTO lyrics (path, status, lrclib_id, "
-            "written_file, written_sha256, checked_at) VALUES "
-            "(?, ?, ?, ?, ?, ?)",
+            "INSERT INTO lyrics (path, status, lrclib_id, written_file, "
+            "written_sha256, checked_at, source) VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT (path) DO UPDATE SET status = excluded.status, "
+            "lrclib_id = excluded.lrclib_id, written_file = "
+            "excluded.written_file, written_sha256 = excluded.written_sha256, "
+            "checked_at = excluded.checked_at, source = excluded.source",
             (relative, status, record_id,
              written.relative_to(root).as_posix() if written else None,
-             digest, store.now_iso()))
+             digest, store.now_iso(), "lrclib" if written else None))
         if reason:
             break
     counts["reason"] = reason
@@ -425,3 +436,146 @@ def remove_written(connection: sqlite3.Connection, root: Path) -> dict:
             connection.execute("DELETE FROM lyrics WHERE path = ?",
                                (row["path"],))
     return {"removed": removed, "kept": kept}
+
+
+# --- Deezer pass -----------------------------------------------------------
+
+def file_unchanged(root: Path, relative: str, digest: str) -> bool:
+    """True when root/relative is a regular file with this SHA-256."""
+    target = root / relative
+    try:
+        return (target.is_file() and not target.is_symlink()
+                and root.resolve() in target.resolve().parents
+                and hashlib.sha256(target.read_bytes()).hexdigest() == digest)
+    except OSError:
+        return False
+
+
+def deezer_due(connection: sqlite3.Connection, root: Path,
+               cover=None) -> list:
+    """Tracks for Deezer, as (path, kind) pairs.
+
+    kind is 'missing' (LRCLIB found nothing and no lyrics file exists) or
+    'upgrade' (LRCLIB only had plain lyrics, written by music-librarian).
+    Tracks Deezer was asked about recently are left out: misses are asked
+    again after NOT_FOUND_RETRY_DAYS, errors after ERROR_RETRY_DAYS.
+    """
+    now = datetime.now(timezone.utc)
+    retry_after = {
+        "error": (now - timedelta(days=ERROR_RETRY_DAYS)).isoformat(),
+        "synced": "",  # nothing left to find
+    }
+    miss_retry = (now - timedelta(days=NOT_FOUND_RETRY_DAYS)).isoformat()
+    cover = cover or coverage(connection, root)
+    result = []
+    for row in connection.execute(
+            "SELECT path, status, source, written_file, deezer_status, "
+            "deezer_checked_at FROM lyrics WHERE status IN "
+            "('notfound', 'plain') ORDER BY path"):
+        state = cover["tracks"].get(row["path"])
+        if row["status"] == "notfound" and state == "not-found":
+            kind = "missing"
+        elif (row["status"] == "plain" and row["source"] == "lrclib"
+              and state == "plain-file" and row["written_file"]
+              and row["written_file"].endswith(PLAIN_EXT)):
+            kind = "upgrade"
+        else:
+            continue
+        when = row["deezer_checked_at"]
+        if when:
+            cutoff = retry_after.get(row["deezer_status"], miss_retry)
+            if not cutoff or when >= cutoff:
+                continue
+        result.append((row["path"], kind))
+    return result
+
+
+def deezer_fill(connection: sqlite3.Connection, root: Path, items, client,
+                stop=None, progress=lambda done, total, found: None) -> dict:
+    """Ask Deezer about each (path, kind) from deezer_due; write sidecars.
+
+    Missing tracks get Song.lrc (synced) or Song.txt (plain). Upgrades get
+    Song.lrc only when Deezer has synced lyrics, and then the unchanged
+    Song.txt music-librarian wrote is removed. Stops on stop, or on a
+    Deezer error that retrying will not fix (such as an expired ARL).
+    """
+    counts = {"synced": 0, "plain": 0, "upgraded": 0, "nolyrics": 0,
+              "nomatch": 0, "error": 0, "skipped": 0}
+    reason = ""
+    failures_in_a_row = 0
+    for done, (relative, kind) in enumerate(items, 1):
+        if stop is not None and stop.is_set():
+            reason = "stopped"
+            break
+        progress(done, len(items),
+                 counts["synced"] + counts["plain"] + counts["upgraded"])
+        path = root / relative
+        synced_path, plain_path = sidecars(path)
+        row = connection.execute(
+            "SELECT written_file, written_sha256 FROM lyrics WHERE path = ?",
+            (relative,)).fetchone()
+        plain_relative = plain_path.relative_to(root).as_posix()
+        if (not path.is_file() or synced_path.exists()
+                or (kind == "missing" and plain_path.exists())
+                or (kind == "upgrade" and not (
+                    row and row["written_file"] == plain_relative
+                    and file_unchanged(root, plain_relative,
+                                       row["written_sha256"])))):
+            counts["skipped"] += 1
+            continue
+        hit, found = None, {"synced": "", "plain": ""}
+        try:
+            hit = client.find(track_info(path))
+            if hit:
+                found = client.lyrics(hit["id"])
+            failures_in_a_row = 0
+            outcome = ("nomatch" if not hit else "synced" if found["synced"]
+                       else "plain" if found["plain"] else "none")
+        except ConnectionError as error:
+            failures_in_a_row += 1
+            outcome = "error"
+            if failures_in_a_row >= 5:
+                reason = f"Deezer unreachable: {error}"
+        except deezer.DeezerError as error:
+            reason = str(error)
+            break
+        update = {"deezer_status": outcome,
+                  "deezer_id": hit.get("id") if hit else None,
+                  "deezer_checked_at": store.now_iso()}
+        try:
+            if outcome == "synced":
+                digest = write_new(synced_path, found["synced"])
+                if kind == "upgrade":
+                    try:
+                        plain_path.unlink()
+                    except OSError:
+                        pass  # players pick the .lrc; the .txt just stays
+                    counts["upgraded"] += 1
+                else:
+                    counts["synced"] += 1
+                update.update(status="synced", source="deezer",
+                              written_sha256=digest,
+                              written_file=synced_path.relative_to(root)
+                              .as_posix())
+            elif outcome == "plain" and kind == "missing":
+                digest = write_new(plain_path, found["plain"])
+                counts["plain"] += 1
+                update.update(status="plain", source="deezer",
+                              written_sha256=digest,
+                              written_file=plain_relative)
+            else:
+                counts[{"nomatch": "nomatch", "error": "error"}.get(
+                    outcome, "nolyrics")] += 1
+        except FileExistsError:
+            counts["skipped"] += 1
+            continue
+        except OSError:
+            counts["error"] += 1
+            update["deezer_status"] = "error"
+        columns = ", ".join(f"{name} = ?" for name in update)
+        connection.execute(f"UPDATE lyrics SET {columns} WHERE path = ?",
+                           (*update.values(), relative))
+        if reason:
+            break
+    counts["reason"] = reason
+    return counts

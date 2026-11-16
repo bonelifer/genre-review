@@ -79,7 +79,8 @@ is off until you turn it on.
 The **Lyrics** page shows how many tracks have lyrics (a `.lrc` or `.txt`
 file beside them, or lyrics in their tags) and lists the albums still
 missing some. **Fill missing lyrics** looks those tracks up on
-[LRCLIB](https://lrclib.net/) in the background:
+[LRCLIB](https://lrclib.net/) in the background (and, if you turn it on,
+Deezer after it):
 
 - Synced lyrics are saved as `Song.lrc` beside `Song.mp3`; plain lyrics as
   `Song.txt`. This is where myMPD and most players look.
@@ -96,6 +97,28 @@ missing some. **Fill missing lyrics** looks those tracks up on
 
 With `LYRICS_AUTO_FILL=1`, new tracks are looked up after each scan (up to
 `LYRICS_AUTO_LIMIT` per scan).
+
+### Deezer as a second source
+
+With `DEEZER_LYRICS=1`, each fill has a second pass after LRCLIB, covering
+tracks LRCLIB had nothing for and tracks where it only had plain lyrics:
+
+- A track is matched on Deezer by artist and length (within 3 seconds).
+- A synced `Song.lrc` from Deezer replaces a plain `Song.txt` that
+  music-librarian wrote, if that file is still unchanged. Tracks with no
+  lyrics at all also get Deezer's plain lyrics as `Song.txt`.
+- The Lyrics page shows how many files came from each source.
+- Tracks Deezer doesn't have are asked again after 90 days.
+
+Deezer's lyrics need a login: the `arl` cookie that
+[deemix](https://gitlab.com/RemixDev/deemix-py) also uses. Point
+`DEEZER_ARL_FILE` at a file holding it, such as deemix's
+`~/.config/deemix/.arl`, or set `DEEZER_ARL`; the file wins when both are
+set. In Docker, mount the folder rather than the file (see `compose.yaml`),
+so a refreshed login is picked up. The ARL is never logged or shown.
+Deezer's lyrics service is not a published API, so this can stop working
+without notice; when the login is refused, the Deezer pass stops and says
+so on the Lyrics page.
 
 ## Setup
 

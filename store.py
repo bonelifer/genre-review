@@ -18,7 +18,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 STATUSES = ("pending", "applied", "skipped", "ignored", "changed", "missing")
 
 SCHEMA = """
@@ -109,6 +109,22 @@ CREATE TABLE settings (
 UPDATE tracks SET fields = NULL
 """
 
+# Schema 5: Deezer as a second lyrics source.
+#   lyrics.source             where the written file came from: 'lrclib' or
+#                             'deezer' (existing written files are LRCLIB's)
+#   lyrics.deezer_status      the last Deezer answer: synced, plain (no
+#                             synced version), none (no lyrics), nomatch
+#                             (track not found) or error
+#   lyrics.deezer_id          the matched Deezer track
+#   lyrics.deezer_checked_at  when Deezer was last asked (UTC)
+MIGRATION_5 = """
+ALTER TABLE lyrics ADD COLUMN source TEXT;
+ALTER TABLE lyrics ADD COLUMN deezer_status TEXT;
+ALTER TABLE lyrics ADD COLUMN deezer_id INTEGER;
+ALTER TABLE lyrics ADD COLUMN deezer_checked_at TEXT;
+UPDATE lyrics SET source = 'lrclib' WHERE written_file IS NOT NULL
+"""
+
 
 def now_iso() -> str:
     """Current UTC time as an ISO 8601 string (storage format)."""
@@ -150,7 +166,7 @@ def connect(path: Path) -> sqlite3.Connection:
             f"(schema {version}, this version knows {SCHEMA_VERSION})."
         )
     for target, script in ((1, SCHEMA), (2, MIGRATION_2), (3, MIGRATION_3),
-                           (4, MIGRATION_4)):
+                           (4, MIGRATION_4), (5, MIGRATION_5)):
         if version < target:
             with transaction(connection):
                 # Another process may have migrated while we waited.

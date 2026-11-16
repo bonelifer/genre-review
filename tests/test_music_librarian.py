@@ -23,6 +23,7 @@ from mutagen.easyid3 import EasyID3  # noqa: E402
 from mutagen.flac import FLAC  # noqa: E402
 from mutagen.id3 import APIC, ID3, TPUB, TXXX  # noqa: E402
 
+import deezer  # noqa: E402
 import music_librarian  # noqa: E402
 import lastfm  # noqa: E402
 import library  # noqa: E402
@@ -1296,8 +1297,8 @@ class LyricsTests(unittest.TestCase):
         self.assertTrue(two.with_suffix(".lrc").exists())
 
 
-class LyricsPageTests(unittest.TestCase):
-    """The Lyrics page with LRCLIB faked."""
+class LyricsPageBase(unittest.TestCase):
+    """A running page with one track and LRCLIB faked (no tests here)."""
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -1340,6 +1341,10 @@ class LyricsPageTests(unittest.TestCase):
                           method="POST")
         with urlopen(request, timeout=10) as response:
             return response.url
+
+
+class LyricsPageTests(LyricsPageBase):
+    """The Lyrics page with LRCLIB faked."""
 
     def test_fill_and_remove_through_the_page(self):
         body = self.get("/lyrics")
@@ -1433,6 +1438,309 @@ class CliTests(unittest.TestCase):
             self.assertIn("MAX_GENRES", str(caught.exception))
         finally:
             del os.environ["MAX_GENRES"]
+
+
+class FakeDeezerServer:
+    """Answers Deezer requests: login, search and lyrics, from dicts."""
+
+    def __init__(self, tracks=None, lyrics_by_id=None, jwt="token"):
+        self.tracks = tracks or {}          # search text -> [hits]
+        self.lyrics_by_id = lyrics_by_id or {}
+        self.jwt = jwt
+        self.calls = []
+        self.reject_tokens = set()
+
+    def opener(self, request, timeout):
+        url = request.full_url
+        if url.startswith(deezer.AUTH_URL.split("?")[0]):
+            self.calls.append("login")
+            self.cookie = request.get_header("Cookie")
+            return FakeResponse(json.dumps(
+                {"jwt": self.jwt} if self.jwt else {}).encode())
+        if url.startswith(deezer.SEARCH_URL):
+            from urllib.parse import parse_qs, urlsplit
+            text = parse_qs(urlsplit(url).query)["q"][0]
+            self.calls.append(("search", text))
+            return FakeResponse(json.dumps(
+                {"data": self.tracks.get(text, [])}).encode())
+        body = json.loads(request.data)
+        token = request.get_header("Authorization").split()[-1]
+        self.calls.append(("lyrics", body["variables"]["id"], token))
+        if token in self.reject_tokens:
+            return FakeResponse(json.dumps({"errors": [
+                {"type": "JwtTokenInvalidError"}], "data": {"track": None}})
+                .encode())
+        return FakeResponse(json.dumps({"data": {"track": {
+            "lyrics": self.lyrics_by_id.get(body["variables"]["id"])}}})
+            .encode())
+
+    def client(self, clock=None):
+        options = {"opener": self.opener, "sleep": lambda _: None}
+        if clock:
+            options["clock"] = clock
+        return deezer.Deezer("secret-arl", **options)
+
+
+DEEZER_SYNCED = {"text": "la la", "synchronizedLines": [
+    {"lrcTimestamp": "[00:01.00]", "line": "la"},
+    {"lrcTimestamp": "[00:02.50]", "line": "la"}]}
+DEEZER_PLAIN = {"text": "words only", "synchronizedLines": None}
+
+
+class DeezerClientTests(unittest.TestCase):
+    """The Deezer client: matching, LRC text, tokens and errors."""
+
+    def test_read_arl_prefers_the_file(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / ".arl"
+            path.write_text("from-file\n")
+            self.assertEqual(deezer.read_arl(str(path), "from-env"),
+                             "from-file")
+            path.write_text("")
+            self.assertEqual(deezer.read_arl(str(path), "from-env"),
+                             "from-env")
+            self.assertEqual(deezer.read_arl(str(Path(temp) / "gone"), ""),
+                             "")
+        with self.assertRaises(deezer.DeezerError):
+            deezer.Deezer("")
+
+    def test_artist_matching_and_lrc(self):
+        self.assertTrue(deezer.same_artist(
+            "Gene Autry with Carl Cotner & His Orchestra", "Gene Autry"))
+        self.assertTrue(deezer.same_artist(
+            "Austin Meade/Treaty Oak Revival", "Austin Meade"))
+        self.assertTrue(deezer.same_artist("Beyoncé", "Beyonce"))
+        self.assertFalse(deezer.same_artist("Vince Gill", "Reba McEntire"))
+        self.assertEqual(deezer.to_lrc(DEEZER_SYNCED["synchronizedLines"]),
+                         "[00:01.00]la\n[00:02.50]la")
+        self.assertEqual(deezer.to_lrc(None), "")
+
+    def test_find_needs_artist_and_length_to_match(self):
+        fake = FakeDeezerServer(tracks={"Vince Gill Her Heart": [
+            {"id": 1, "duration": 300, "artist": {"name": "Vince Gill"}},
+            {"id": 2, "duration": 224, "artist": {"name": "Someone Else"}},
+            {"id": 3, "duration": 225, "artist": {"name": "Vince Gill"}}]})
+        client = fake.client()
+        hit = client.find({"title": "Her Heart", "artist": "Vince Gill",
+                           "duration": 223.4})
+        self.assertEqual(hit["id"], 3)
+        self.assertIsNone(client.find({"title": "Her Heart",
+                                       "artist": "Vince Gill",
+                                       "duration": 100}))
+        self.assertIsNone(client.find({"title": "", "artist": "X",
+                                       "duration": 100}))
+
+    def test_token_is_renewed_when_old_or_rejected(self):
+        now = [0.0]
+        fake = FakeDeezerServer(lyrics_by_id={"7": DEEZER_SYNCED})
+        client = fake.client(clock=lambda: now[0])
+        self.assertEqual(client.lyrics(7)["synced"],
+                         "[00:01.00]la\n[00:02.50]la")
+        self.assertEqual(fake.cookie, "arl=secret-arl")
+        client.lyrics(7)
+        self.assertEqual(fake.calls.count("login"), 1)
+        now[0] += deezer.TOKEN_SECONDS + 1  # token too old: log in again
+        client.lyrics(7)
+        self.assertEqual(fake.calls.count("login"), 2)
+        fake.reject_tokens.add("token")      # rejected early: once more
+        fake.jwt = "fresh"
+        self.assertEqual(client.lyrics(7)["plain"], "la la")
+        self.assertEqual(fake.calls.count("login"), 3)
+
+    def test_refused_login_and_missing_lyrics(self):
+        fake = FakeDeezerServer(jwt="")
+        with self.assertRaises(deezer.DeezerError):
+            fake.client().lyrics(1)
+        fake = FakeDeezerServer()
+        self.assertEqual(fake.client().lyrics(1), {"synced": "",
+                                                   "plain": ""})
+
+    def test_http_401_stops_with_a_clear_error(self):
+        def opener(request, timeout):
+            raise HTTPError(request.full_url, 401, "Unauthorized", {},
+                            io.BytesIO(b""))
+        client = deezer.Deezer("arl", opener=opener, sleep=lambda _: None)
+        with self.assertRaisesRegex(deezer.DeezerError, "expired"):
+            client.lyrics(1)
+
+
+class FakeDeezerClient:
+    """Stands in for deezer.Deezer: title -> (track id, lyrics)."""
+
+    def __init__(self, answers, error=None):
+        self.answers = answers
+        self.error = error
+        self.asked = []
+
+    def find(self, info):
+        self.asked.append(info.get("title"))
+        if self.error:
+            raise self.error
+        answer = self.answers.get(info.get("title"))
+        return {"id": answer[0]} if answer else None
+
+    def lyrics(self, track_id):
+        for found_id, found in self.answers.values():
+            if found_id == track_id:
+                return found
+        return {"synced": "", "plain": ""}
+
+
+class DeezerFillTests(LyricsTests):
+    """The Deezer pass after LRCLIB (reuses the LRCLIB test helpers)."""
+
+    def lrclib_pass(self, replies):
+        self.scan()
+        fake = FakeLrclib(replies)
+        lyrics.fill(self.db, self.root, lyrics.due(self.db, self.root),
+                    client=fake.client())
+
+    def test_deezer_fills_missing_and_upgrades_plain(self):
+        missing = self.track("01.mp3", "Missing")
+        plain = self.track("02.mp3", "Plain")
+        self.track("03.mp3", "Nowhere")
+        synced = self.track("04.mp3", "Synced")
+        words = self.track("05.mp3", "Words")
+        self.lrclib_pass({
+            ("get", "Plain"): {"id": 2, "syncedLyrics": None,
+                               "plainLyrics": "plain", "instrumental": False},
+            ("get", "Synced"): SYNCED,
+        })
+        due = dict(lyrics.deezer_due(self.db, self.root))
+        self.assertEqual(due, {"A/01.mp3": "missing", "A/02.mp3": "upgrade",
+                               "A/03.mp3": "missing",
+                               "A/05.mp3": "missing"})
+        client = FakeDeezerClient({
+            "Missing": (11, {"synced": "[00:01.00]m", "plain": "m"}),
+            "Plain": (12, {"synced": "[00:01.00]p", "plain": "p"}),
+            "Words": (15, {"synced": "", "plain": "just words"}),
+        })
+        result = lyrics.deezer_fill(self.db, self.root,
+                                    lyrics.deezer_due(self.db, self.root),
+                                    client)
+        self.assertEqual((result["synced"], result["plain"],
+                          result["upgraded"], result["nomatch"]),
+                         (1, 1, 1, 1))
+        self.assertEqual(missing.with_suffix(".lrc").read_text(),
+                         "[00:01.00]m\n")
+        self.assertTrue(plain.with_suffix(".lrc").is_file())
+        self.assertFalse(plain.with_suffix(".txt").exists())
+        self.assertEqual(words.with_suffix(".txt").read_text(),
+                         "just words\n")
+        self.assertFalse(synced.with_suffix(".txt").exists())
+        rows = {row["path"]: row for row in self.db.execute(
+            "SELECT * FROM lyrics")}
+        self.assertEqual(rows["A/02.mp3"]["source"], "deezer")
+        self.assertEqual(rows["A/02.mp3"]["status"], "synced")
+        self.assertEqual(rows["A/04.mp3"]["source"], "lrclib")
+        self.assertEqual(rows["A/03.mp3"]["deezer_status"], "nomatch")
+        # Nothing is due again until the retry time has passed.
+        self.assertEqual(lyrics.deezer_due(self.db, self.root), [])
+        # Undo removes Deezer's files like LRCLIB's.
+        removed = lyrics.remove_written(self.db, self.root)
+        self.assertEqual(removed["removed"], 4)
+        self.assertFalse(plain.with_suffix(".lrc").exists())
+
+    def test_changed_plain_file_is_not_upgraded(self):
+        plain = self.track("01.mp3", "Plain")
+        self.lrclib_pass({("get", "Plain"): {
+            "id": 2, "syncedLyrics": None, "plainLyrics": "plain",
+            "instrumental": False}})
+        plain.with_suffix(".txt").write_text("my own edit\n")
+        client = FakeDeezerClient({"Plain": (12, {"synced": "[00:01.00]p",
+                                                  "plain": "p"})})
+        result = lyrics.deezer_fill(self.db, self.root,
+                                    lyrics.deezer_due(self.db, self.root),
+                                    client)
+        self.assertEqual(result["skipped"], 1)
+        self.assertEqual(client.asked, [])
+        self.assertFalse(plain.with_suffix(".lrc").exists())
+        self.assertEqual(plain.with_suffix(".txt").read_text(),
+                         "my own edit\n")
+
+    def test_refused_login_stops_the_pass(self):
+        self.track("01.mp3", "One")
+        self.track("02.mp3", "Two")
+        self.lrclib_pass({})
+        client = FakeDeezerClient({}, error=deezer.DeezerError("expired"))
+        result = lyrics.deezer_fill(self.db, self.root,
+                                    lyrics.deezer_due(self.db, self.root),
+                                    client)
+        self.assertEqual(result["reason"], "expired")
+        self.assertEqual(client.asked, ["One"])
+        self.assertEqual(len(lyrics.deezer_due(self.db, self.root)), 2)
+
+    def test_lrclib_recheck_keeps_deezer_columns(self):
+        self.track("01.mp3", "One")
+        self.lrclib_pass({})
+        lyrics.deezer_fill(self.db, self.root,
+                           lyrics.deezer_due(self.db, self.root),
+                           FakeDeezerClient({}))
+        fake = FakeLrclib({})
+        lyrics.fill(self.db, self.root, ["A/01.mp3"], client=fake.client())
+        row = self.db.execute("SELECT deezer_status, deezer_checked_at "
+                              "FROM lyrics").fetchone()
+        self.assertEqual(row["deezer_status"], "nomatch")
+        self.assertIsNotNone(row["deezer_checked_at"])
+
+    def test_schema_4_upgrade_marks_written_files_as_lrclib(self):
+        path = Path(self.temp.name) / "v4.sqlite"
+        old = store.sqlite3.connect(path)
+        for script in (store.SCHEMA, store.MIGRATION_2, store.MIGRATION_3,
+                       store.MIGRATION_4):
+            for statement in script.split(";"):
+                if statement.strip():
+                    old.execute(statement)
+        old.execute("INSERT INTO lyrics (path, status, written_file, "
+                    "written_sha256, checked_at) VALUES ('a.mp3', 'plain', "
+                    "'a.txt', 'x', 'now'), ('b.mp3', 'notfound', NULL, NULL, "
+                    "'now')")
+        old.execute("PRAGMA user_version=4")
+        old.commit()
+        old.close()
+        upgraded = store.connect(path)
+        try:
+            rows = dict(upgraded.execute("SELECT path, source FROM lyrics"))
+            self.assertEqual(rows, {"a.mp3": "lrclib", "b.mp3": None})
+        finally:
+            upgraded.close()
+
+
+class DeezerPageTests(LyricsPageBase):
+    """The Lyrics page and fill job with Deezer turned on."""
+
+    def setUp(self):
+        super().setUp()
+        self.fake.replies.clear()  # LRCLIB has nothing
+        self.reviewer.settings.deezer_lyrics = True
+        self.client = FakeDeezerClient({"One": (
+            9, {"synced": "[00:01.00]one", "plain": "one"})})
+        self.reviewer.deezer_client = lambda: self.client
+
+    def test_fill_runs_deezer_after_lrclib(self):
+        result = self.reviewer.fill_lyrics()
+        self.assertEqual(result["notfound"], 1)
+        self.assertEqual(result["deezer"]["synced"], 1)
+        self.assertTrue(self.track.with_suffix(".lrc").is_file())
+        self.assertIn("1 synced", self.reviewer.status["deezer"])
+        body = self.get("/lyrics")
+        self.assertIn("Last Deezer pass:", body)
+        self.assertIn("1 from Deezer", body)
+
+    def test_page_offers_the_deezer_lookups(self):
+        connection = self.reviewer.connect()
+        lyrics.fill(connection, self.root, ["A/Album/01.mp3"],
+                    client=self.original(opener=self.fake.opener,
+                                         sleep=lambda _: None))
+        connection.close()
+        body = self.get("/lyrics")
+        self.assertIn("Fill missing lyrics (1 on Deezer)", body)
+        self.assertIn("Deezer is asked next", body)
+
+    def test_missing_arl_is_reported(self):
+        self.reviewer.deezer_client = lambda: deezer.Deezer("")
+        self.reviewer.fill_lyrics()
+        self.assertIn("no Deezer ARL", self.reviewer.status["deezer"])
 
 
 if __name__ == "__main__":
