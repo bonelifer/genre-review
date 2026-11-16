@@ -2,15 +2,20 @@
 
 A "field" is an ID3 frame ID (TPUB), or for frames that can repeat with a
 description, the ID plus that description (TXXX:BARCODE, COMM:iTunNORM).
+The old-style ID3v1 block at the end of an MP3 is one more field, "ID3v1".
 Other formats report their own key names (FLAC/Ogg comments, MP4 atoms)
 but only MP3 files are ever changed.
 
 Removed frames are kept byte for byte: they are written into a small,
 self-contained ID3 block and stored in SQLite, so Restore puts back exactly
-what was taken out.
+what was taken out. A removed ID3v1 block is stored as its raw bytes.
+
+Saved removal rules can also run by themselves after each library scan
+(the "auto clean" setting), so new downloads get the same cleanup.
 """
 
 import io
+import os
 import re
 import sqlite3
 import threading
@@ -39,6 +44,51 @@ PROTECTED_PATTERNS = (
 )
 EXAMPLE_LENGTH = 60
 
+# The ID3v1 block: 128 bytes starting "TAG" at the very end of the file,
+# sometimes preceded by a 227-byte "TAG+" extension.
+V1_FIELD = "ID3v1"
+V1_SIZE = 128
+V1_EXTENDED_SIZE = 227
+
+# Which tool usually writes a field, and whether it is worth keeping.
+# (pattern, source, note); the first match wins. Fields not listed here
+# show no source rather than a guess.
+SOURCES = (
+    (r"^ID3v1$", "deemix (saveID3v1)",
+     "Safe to remove: an old copy of the main tag."),
+    (r"^TXXX:ITUNESADVISORY$", "deemix (explicit)",
+     "Safe to remove: the explicit-lyrics flag."),
+    (r"^TXXX:BARCODE$", "deemix (barcode)", "Safe to remove."),
+    (r"^TPUB$", "deemix (label)", "Safe to remove: the record label."),
+    (r"^TSRC$", "deemix (isrc)",
+     "Keep if you repair tracks by ISRC; otherwise safe to remove."),
+    (r"^TLEN$", "deemix (length)",
+     "Safe to remove: players measure the length themselves."),
+    (r"^TBPM$", "deemix (bpm)",
+     "Keep: tempo, useful for BPM-based playlists."),
+    (r"^TXXX:(Tracktotal|Disctotal)$", "deemix", "Safe to remove."),
+    (r"^TXXX:SCRIPT$", "Picard",
+     "Safe to remove: the writing system (Latn). Picard adds it again "
+     "when it retags."),
+    (r"^TXXX:MusicBrainz ", "Picard", "Kept: MusicBrainz IDs."),
+    (r"^UFID:http://musicbrainz\.org$", "Picard", "Kept: MusicBrainz ID."),
+    (r"^(TSOP|TSO2|TSOC|TSOA|TSOT)$", "Picard",
+     "Keep: sort names used by players."),
+    (r"^TXXX:(ARTISTS|ALBUMARTISTS|originalyear|CATALOGNUMBER|ASIN|"
+     r"RELEASETYPE|Writer|WORK|SHOWMOVEMENT|LICENSE)$", "Picard",
+     "Safe to remove unless a player or script uses it."),
+    (r"^(TDOR|TMED|TLAN|TIPL|TMCL|TCMP|TSST|MVIN|MVNM)$", "Picard",
+     "Safe to remove unless a player or script uses it."),
+    (r"^TXXX:Acoustid ", "Picard (AcoustID)",
+     "Safe to remove; the fingerprint is large."),
+    (r"^TXXX:AURRAL_IDS$", "Aurral",
+     "Keep if you use Aurral; it tracks files with it."),
+    (r"^TSSE$", "Encoder", "Safe to remove: encoder settings."),
+    (r"^TXXX:REPLAYGAIN_", "ReplayGain tool", "Kept: loudness levels."),
+)
+_SOURCE_PATTERNS = tuple((re.compile(pattern, re.IGNORECASE), source, note)
+                         for pattern, source, note in SOURCES)
+
 # The inventory unpacks every track's field list, which takes seconds on a
 # large library, so results are kept until the data behind them changes.
 _cache = {}
@@ -66,8 +116,18 @@ def is_protected(field: str) -> bool:
     return any(pattern.search(field) for pattern in PROTECTED_PATTERNS)
 
 
+def source(field: str):
+    """(tool, note) for a field from SOURCES, or None when unknown."""
+    for pattern, tool, note in _SOURCE_PATTERNS:
+        if pattern.search(field):
+            return tool, note
+    return None
+
+
 def describe(field: str) -> str:
     """Plain-words name: 'Publisher (TPUB)', 'BARCODE (custom text)'."""
+    if field == V1_FIELD:
+        return "ID3v1 tag (old-style tag at the end of the file)"
     frame_id, _, detail = field.partition(":")
     if frame_id == "TXXX":
         return f"{detail or '(no name)'} (custom text, TXXX)"
@@ -102,17 +162,74 @@ def example(frame) -> str:
     return value
 
 
+def read_v1(path: Path) -> bytes:
+    """The raw ID3v1 block at the end of path (with any TAG+ part), or b""."""
+    with open(path, "rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        size = handle.tell()
+        if size < V1_SIZE:
+            return b""
+        handle.seek(size - V1_SIZE)
+        block = handle.read(V1_SIZE)
+        if not block.startswith(b"TAG"):
+            return b""
+        extended = V1_SIZE + V1_EXTENDED_SIZE
+        if size >= extended:
+            handle.seek(size - extended)
+            head = handle.read(V1_EXTENDED_SIZE)
+            if head.startswith(b"TAG+"):
+                block = head + block
+        return block
+
+
+def v1_example(block: bytes) -> str:
+    """'Title / Artist' from an ID3v1 block, for the inventory."""
+    base = block[-V1_SIZE:]
+    parts = [base[start:start + 30].split(b"\0", 1)[0]
+             .decode("latin-1").strip() for start in (3, 33)]
+    value = " / ".join(part for part in parts if part)
+    return re.sub(r"[\x00-\x1f\x7f]", " ", value)[:EXAMPLE_LENGTH] \
+        or "(empty)"
+
+
+def strip_v1(path: Path, block: bytes) -> None:
+    """Cut block off the end of path if the file still ends with it."""
+    with open(path, "r+b") as handle:
+        handle.seek(0, os.SEEK_END)
+        size = handle.tell()
+        if size < len(block):
+            return
+        handle.seek(size - len(block))
+        if handle.read(len(block)) == block:
+            handle.truncate(size - len(block))
+
+
+def put_v1(path: Path, block: bytes) -> None:
+    """Write block as the file's ID3v1 tag, replacing any there now."""
+    current = read_v1(path)
+    if current:
+        strip_v1(path, current)
+    with open(path, "ab") as handle:
+        handle.write(block)
+
+
 def read_fields(path: Path) -> dict:
     """{field: example} for every tag field in one file."""
     try:
         if path.suffix.lower() == ".mp3":
+            fields = {}
             try:
                 tags = ID3(path)
             except ID3NoHeaderError:
-                return {}
-            fields = {}
-            for frame in tags.values():
-                fields.setdefault(field_key(frame), example(frame))
+                tags = None
+            # A file with only an ID3v1 tag loads as version 1.x; its
+            # values are the ID3v1 field, not separate frames.
+            if tags is not None and tags.version[0] >= 2:
+                for frame in tags.values():
+                    fields.setdefault(field_key(frame), example(frame))
+            block = read_v1(path)
+            if block:
+                fields[V1_FIELD] = v1_example(block)
             return fields
         audio = mutagen.File(path)
     except Exception as error:  # mutagen raises many error types
@@ -156,48 +273,79 @@ def save_preserving_version(tags: ID3, path: Path) -> None:
 def remove_from_file(path: Path, fields) -> dict:
     """Take the given fields out of one MP3.
 
-    Returns {field: packed frames} for the fields that were present; the
-    caller stores these before calling write_removal() to commit them.
+    Returns {field: stored data} for the fields that were present (packed
+    frames, or the raw block for ID3v1); the caller stores these before
+    calling write_removal() to commit them.
     """
+    found, packed = {}, {}
+    frame_fields = set(fields) - {V1_FIELD}
     try:
-        tags = ID3(path)
-    except ID3NoHeaderError:
-        return {}
+        if V1_FIELD in fields:
+            block = read_v1(path)
+            if block:
+                packed[V1_FIELD] = block
+        if frame_fields:
+            try:
+                tags = ID3(path)
+            except ID3NoHeaderError:
+                tags = None
+            if tags is not None and tags.version[0] >= 2:
+                for frame in tags.values():
+                    key = field_key(frame)
+                    if key in frame_fields and not is_protected(key):
+                        found.setdefault(key, []).append(frame)
     except Exception as error:
         raise TagError(f"{path}: {error}") from error
-    found = {}
-    for frame in tags.values():
-        key = field_key(frame)
-        if key in fields and not is_protected(key):
-            found.setdefault(key, []).append(frame)
-    return {key: pack_frames(frames) for key, frames in found.items()}
+    packed.update((key, pack_frames(frames)) for key, frames in found.items())
+    return packed
 
 
-def write_removal(path: Path, fields) -> None:
-    """Delete the given fields from one MP3 and save it."""
+def write_removal(path: Path, fields, v1_block: bytes = b"") -> None:
+    """Delete the given fields from one MP3 and save it.
+
+    The ID3v1 block is cut off last, and only if the file still ends with
+    v1_block (the bytes that were backed up).
+    """
+    frame_fields = set(fields) - {V1_FIELD}
     try:
-        tags = ID3(path)
-        for hash_key, frame in list(tags.items()):
-            key = field_key(frame)
-            if key in fields and not is_protected(key):
-                del tags[hash_key]
-        save_preserving_version(tags, path)
-    except Exception as error:
-        raise TagError(f"{path}: {error}") from error
-
-
-def write_restore(path: Path, data_blocks) -> None:
-    """Add stored frames back to one MP3, replacing same-named frames."""
-    try:
-        try:
+        if frame_fields:
             tags = ID3(path)
-        except ID3NoHeaderError:
-            tags = ID3()
-        for data in data_blocks:
-            for frame in unpack_frames(data):
-                tags.delall(frame.HashKey)
-                tags.add(frame)
-        save_preserving_version(tags, path)
+            for hash_key, frame in list(tags.items()):
+                key = field_key(frame)
+                if key in frame_fields and not is_protected(key):
+                    del tags[hash_key]
+            save_preserving_version(tags, path)
+        if V1_FIELD in fields:
+            # Saving above may have refreshed the ID3v1 block from the
+            # frames, so cut whatever block the file ends with now.
+            strip_v1(path, read_v1(path) if frame_fields else v1_block)
+    except Exception as error:
+        raise TagError(f"{path}: {error}") from error
+
+
+def write_restore(path: Path, items) -> None:
+    """Put stored (field, data) items back into one MP3.
+
+    Frames replace same-named frames; an ID3v1 block replaces any ID3v1
+    tag the file has now.
+    """
+    frames = [data for field, data in items if field != V1_FIELD]
+    blocks = [data for field, data in items if field == V1_FIELD]
+    try:
+        if frames:
+            try:
+                tags = ID3(path)
+            except ID3NoHeaderError:
+                tags = ID3()
+            if tags.version[0] < 2:
+                tags = ID3()
+            for data in frames:
+                for frame in unpack_frames(data):
+                    tags.delall(frame.HashKey)
+                    tags.add(frame)
+            save_preserving_version(tags, path)
+        if blocks:
+            put_v1(path, blocks[-1])
     except Exception as error:
         raise TagError(f"{path}: {error}") from error
 
@@ -308,6 +456,29 @@ def save_rules(connection: sqlite3.Connection, fields) -> None:
                     (field, stamp))
 
 
+def auto_clean_enabled(connection: sqlite3.Connection) -> bool:
+    """Whether saved rules run by themselves after each library scan."""
+    row = connection.execute(
+        "SELECT value FROM settings WHERE key = 'auto_clean'").fetchone()
+    return bool(row) and row[0] == "1"
+
+
+def set_auto_clean(connection: sqlite3.Connection, enabled: bool) -> None:
+    """Turn automatic cleanup after scans on or off."""
+    with store.transaction(connection):
+        connection.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES "
+            "('auto_clean', ?, ?) ON CONFLICT (key) DO UPDATE SET "
+            "value = excluded.value, updated_at = excluded.updated_at",
+            ("1" if enabled else "0", store.now_iso()))
+
+
+def auto_clean_due(connection: sqlite3.Connection) -> bool:
+    """True when auto clean is on and some MP3 carries a rule field."""
+    return auto_clean_enabled(connection) and bool(
+        affected(connection, rule_fields(connection)))
+
+
 def affected(connection: sqlite3.Connection, fields) -> list:
     """MP3 tracks carrying any of fields: [(path, album_id)]."""
     if not fields:
@@ -366,7 +537,7 @@ def apply_rules(connection: sqlite3.Connection, root: Path,
                         "INSERT INTO removed_tags (path, field, data, "
                         "removed_at) VALUES (?, ?, ?, ?)",
                         (relative, field, data, stamp))
-            write_removal(path, set(packed))
+            write_removal(path, set(packed), packed.get(V1_FIELD, b""))
             _refresh_track(connection, root, relative)
         except (TagError, OSError) as error:
             errors.append(str(error))
@@ -379,8 +550,9 @@ def apply_rules(connection: sqlite3.Connection, root: Path,
 def restore(connection: sqlite3.Connection, root: Path, field=None,
             album_id=None, progress=lambda done, total: None) -> dict:
     """Put removed frames back, for one field or one album (or both)."""
-    query = ("SELECT removed_tags.id, removed_tags.path, removed_tags.data, "
-             "tracks.album_id FROM removed_tags LEFT JOIN tracks ON "
+    query = ("SELECT removed_tags.id, removed_tags.path, removed_tags.field, "
+             "removed_tags.data, tracks.album_id FROM removed_tags LEFT "
+             "JOIN tracks ON "
              "tracks.path = removed_tags.path WHERE restored_at IS NULL")
     params = []
     if field is not None:
@@ -399,7 +571,8 @@ def restore(connection: sqlite3.Connection, root: Path, field=None,
         progress(done, len(by_path))
         try:
             path = _safe_path(root, relative)
-            write_restore(path, [item["data"] for item in items])
+            write_restore(path, [(item["field"], item["data"])
+                                 for item in items])
             stamp = store.now_iso()
             with store.transaction(connection):
                 for item in items:

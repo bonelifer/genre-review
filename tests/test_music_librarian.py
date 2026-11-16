@@ -782,7 +782,7 @@ class TagTests(unittest.TestCase):
         tags.save_rules(self.db, ["TPUB"])
         original = tags.write_removal
 
-        def crash(path, fields):
+        def crash(path, fields, *rest):
             raise tags.TagError("disk full")
 
         tags.write_removal = crash
@@ -826,6 +826,92 @@ class TagTests(unittest.TestCase):
         self.assertEqual(tags.cached_affected(self.db, {"TPUB"}), [])
         tags.restore(self.db, self.root, field="TPUB")
         self.assertEqual(tpub_files(), 1)
+
+    def add_v1(self, path=None):
+        """Give the test MP3 (or path) an ID3v1 block; return its bytes."""
+        path = path or self.track
+        id3 = ID3(path)
+        id3.save(path, v1=2, v2_version=3)
+        block = tags.read_v1(path)
+        self.assertEqual(len(block), 128)
+        library.scan(self.db, self.root, log=lambda _: None)
+        return block
+
+    def test_id3v1_is_listed_removed_and_restored_exactly(self):
+        self.add_v1()
+        original = self.track.read_bytes()
+        found = {item["field"]: item for item in tags.inventory(self.db)}
+        self.assertEqual(found["ID3v1"]["files"], 1)
+        self.assertFalse(found["ID3v1"]["protected"])
+        self.assertIn("ID3v1", tags.describe("ID3v1"))
+        tags.save_rules(self.db, ["ID3v1"])
+        result = tags.apply_rules(self.db, self.root)
+        self.assertEqual((result["files"], result["errors"]), (1, []))
+        self.assertEqual(tags.read_v1(self.track), b"")
+        self.assertEqual(self.track.read_bytes(), original[:-128])
+        self.assertIn("TPUB", self.frames())
+        tags.restore(self.db, self.root, field="ID3v1")
+        self.assertEqual(self.track.read_bytes(), original)
+
+    def test_id3v1_and_frames_removed_together(self):
+        block = self.add_v1()
+        tags.save_rules(self.db, ["ID3v1", "TPUB"])
+        tags.apply_rules(self.db, self.root)
+        self.assertEqual(tags.read_v1(self.track), b"")
+        self.assertNotIn("TPUB", self.frames())
+        self.assertEqual(ID3(self.track).version[:2], (2, 3))
+        tags.restore(self.db, self.root, album_id=1)
+        self.assertEqual(tags.read_v1(self.track), block)
+        self.assertEqual(ID3(self.track)["TPUB"].text, ["Some Label"])
+
+    def test_file_with_only_id3v1(self):
+        bare = self.root / "B/Bare/01.mp3"
+        bare.parent.mkdir(parents=True)
+        bare.write_bytes(b"\xff\xfb\x90\x64" + bytes(413)
+                         + b"TAG" + b"Old Title".ljust(30, b"\0")
+                         + b"Old Artist".ljust(30, b"\0") + bytes(65))
+        self.assertEqual(tags.read_fields(bare),
+                         {"ID3v1": "Old Title / Old Artist"})
+        packed = tags.remove_from_file(bare, {"ID3v1", "TPUB"})
+        self.assertEqual(set(packed), {"ID3v1"})
+        tags.write_removal(bare, set(packed), packed["ID3v1"])
+        self.assertEqual(bare.stat().st_size, 417)
+
+    def test_v1_is_not_cut_when_the_file_changed(self):
+        block = self.add_v1()
+        tags.write_removal(self.track, {"ID3v1"}, b"TAG" + bytes(125))
+        self.assertEqual(tags.read_v1(self.track), block)
+
+    def test_sources_name_known_fields_only(self):
+        self.assertTrue(tags.source("TXXX:ITUNESADVISORY")[0]
+                        .startswith("deemix"))
+        self.assertEqual(tags.source("TXXX:SCRIPT")[0], "Picard")
+        self.assertTrue(tags.source("ID3v1")[0].startswith("deemix"))
+        self.assertIn("Keep", tags.source("TBPM")[1])
+        self.assertIsNone(tags.source("TXXX:SOMETHING ELSE"))
+
+    def test_schema_3_upgrade_rereads_fields(self):
+        path = Path(self.temp.name) / "v3.sqlite"
+        old = store.sqlite3.connect(path)
+        for script in (store.SCHEMA, store.MIGRATION_2, store.MIGRATION_3):
+            for statement in script.split(";"):
+                if statement.strip():
+                    old.execute(statement)
+        old.execute("INSERT INTO albums (album_key, albumartist, album, "
+                    "folder, updated_at) VALUES ('k', 'A', 'B', 'f', 'x')")
+        old.execute("INSERT INTO tracks (path, album_id, album_key, "
+                    "albumartist, album, mtime_ns, size, genres, fields) "
+                    "VALUES ('a.mp3', 1, 'k', 'A', 'B', 1, 1, '[]', '{}')")
+        old.execute("PRAGMA user_version=3")
+        old.commit()
+        old.close()
+        upgraded = store.connect(path)
+        try:
+            self.assertIsNone(upgraded.execute(
+                "SELECT fields FROM tracks").fetchone()[0])
+            self.assertFalse(tags.auto_clean_enabled(upgraded))
+        finally:
+            upgraded.close()
 
     def test_schema_1_database_is_upgraded(self):
         path = Path(self.temp.name) / "old.sqlite"
@@ -909,6 +995,44 @@ class TagPageTests(unittest.TestCase):
         url = self.post("/album/1/restore-tags", {"token": token})
         self.assertIn("Restored+tags+in+1+files", url)
         self.assertEqual(ID3(self.track)["TPUB"].text, ["Some Label"])
+
+    def test_page_shows_sources_and_auto_switch(self):
+        body = self.get("/tags")
+        self.assertIn(">Source<", body)
+        self.assertIn("deemix (label)", body)
+        self.assertIn('name="enabled" value="1">', body)
+        url = self.post("/tags/auto", {"token": self.server.token,
+                                       "enabled": "1"})
+        self.assertIn("Automatic+cleanup+is+on", url)
+        self.assertIn('value="1" checked>', self.get("/tags"))
+        url = self.post("/tags/auto", {"token": self.server.token})
+        self.assertIn("Automatic+cleanup+is+off", url)
+
+    def test_auto_clean_after_scan_handles_new_files(self):
+        token = self.server.token
+        self.post("/tags/rules", {"token": token, "field": ["TPUB"]})
+        self.post("/tags/apply", {"token": token})
+        self.reviewer.tag_job.join(10)
+        # Removed everywhere, the field can still be kept as a rule.
+        self.assertIn('value="TPUB" checked', self.get("/tags"))
+        newer = self.root / "B/Newer/01.mp3"
+        make_mp3(newer, artist="B", album="Newer")
+        add_clutter(newer)
+        self.reviewer.scan()
+        self.reviewer.auto_clean()
+        self.assertIn("TPUB", ID3(newer))
+        self.post("/tags/auto", {"token": token, "enabled": "1"})
+        self.reviewer.auto_clean()
+        self.assertNotIn("TPUB", ID3(newer))
+        self.assertIn("Auto-cleaned 1 files in 1 albums",
+                      self.reviewer.status["tags"])
+        stored = self.reviewer.connect()
+        try:
+            self.assertEqual(stored.execute(
+                "SELECT COUNT(*) FROM removed_tags WHERE path LIKE 'B/%'"
+            ).fetchone()[0], 1)
+        finally:
+            stored.close()
 
     def test_tag_forms_need_the_token(self):
         request = Request(self.base + "/tags/apply", b"token=wrong",

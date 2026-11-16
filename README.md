@@ -39,8 +39,10 @@ then list each genre on its own.
 ## Tag cleanup
 
 The **Tags** page lists every tag field found in the library, with how many
-files and albums carry it and a few example values. Click an album count to
-see which albums have that field.
+files and albums carry it and a few example values. For fields it
+recognizes, the **Source** column names the tool that usually writes them
+(deemix, Picard, Aurral, the encoder) and whether they are worth keeping.
+Click an album count to see which albums have that field.
 
 Tick fields you don't want (record labels, barcodes, encoder notes, and so
 on) and save. The page then shows how many MP3 files and albums would
@@ -56,7 +58,17 @@ changed.
 - Only MP3 files are cleaned. Other formats show up in the list but are left
   alone.
 - An ID3v2.3 file stays ID3v2.3. The audio is not touched.
-- New downloads are cleaned only when you press the button again.
+- The **ID3v1 tag** row is the old-style copy of the tag that some
+  downloaders add at the end of the file. Removing it keeps the main tag;
+  Restore puts the exact bytes back.
+- Fields already removed everywhere stay in the list, so they can remain
+  marked for removal.
+
+Tick **Clean new and changed files automatically after each scan** to keep
+new downloads clean too. After every scan (hourly, or **Scan now**) the
+fields marked for removal are taken out of any MP3 that has them, with the
+same backups, and the status line reports how many files were cleaned. It
+is off until you turn it on.
 
 ## Lyrics
 

@@ -280,9 +280,26 @@ class Reviewer:
         return ("Removing tags in the background." if kind == "apply"
                 else "Restoring tags in the background.")
 
-    def _run_tag_job(self, kind: str, field) -> None:
-        """Body of start_tag_job's thread."""
-        verb = "Removing" if kind == "apply" else "Restoring"
+    def auto_clean(self) -> None:
+        """Apply the saved removal rules after a scan, if auto clean is on.
+
+        Runs in the calling (background) thread, only when some MP3 still
+        carries a rule field and no tag job from the page is running.
+        """
+        if self.tag_job is not None and self.tag_job.is_alive():
+            return
+        connection = self.connect()
+        try:
+            due = tags.auto_clean_due(connection)
+        finally:
+            connection.close()
+        if due:
+            self._run_tag_job("apply", None, auto=True)
+
+    def _run_tag_job(self, kind: str, field, auto: bool = False) -> None:
+        """Body of start_tag_job's thread (and of auto_clean)."""
+        verb = "Auto-cleaning" if auto else (
+            "Removing" if kind == "apply" else "Restoring")
 
         def progress(done, total):
             self.status["tags"] = f"{verb}: file {done} of {total}"
@@ -310,7 +327,8 @@ class Reviewer:
             return
         mpd_note = self.update_mpd_folders(folders)
         self.warm_tag_cache()
-        done = "Removed tags from" if kind == "apply" else "Restored tags in"
+        done = "Auto-cleaned" if auto else (
+            "Removed tags from" if kind == "apply" else "Restored tags in")
         message = (f"{store.now_display()}: {done} {result['files']} files in "
                    f"{len(result['albums'])} albums.")
         if result["errors"]:
@@ -433,6 +451,7 @@ class Reviewer:
         while not stop.is_set():
             try:
                 self.scan()
+                self.auto_clean()
                 self.suggest_missing()
                 self.warm_tag_cache()
                 if self.settings.lyrics_auto_fill:
