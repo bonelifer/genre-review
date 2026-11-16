@@ -21,4 +21,11 @@ services:
         target: /state
         bind:
           create_host_path: false
+      # For Deezer lyrics (DEEZER_LYRICS=1 with DEEZER_ARL_FILE=/deemix/.arl):
+      # mount deemix's folder, not the .arl file itself, so a refreshed
+      # login is seen without restarting.
+      # - type: bind
+      #   source: ${HOME}/.config/deemix
+      #   target: /deemix
+      #   read_only: true
     restart: unless-stopped

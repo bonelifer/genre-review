@@ -15,10 +15,11 @@ import os
 import sqlite3
 import sys
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import deezer
 import lastfm
 import library
 import lyrics
@@ -46,6 +47,9 @@ class Settings:
     mpd_path_prefix: str
     lyrics_auto_fill: bool = False
     lyrics_auto_limit: int = 300
+    deezer_lyrics: bool = False
+    deezer_arl_file: str = ""
+    deezer_arl: str = dataclass_field(default="", repr=False)
 
     @property
     def db_path(self) -> Path:
@@ -130,6 +134,9 @@ def load_settings(args) -> Settings:
         mpd_path_prefix=os.environ.get("MPD_PATH_PREFIX", "").strip("/"),
         lyrics_auto_fill=env_flag("LYRICS_AUTO_FILL"),
         lyrics_auto_limit=env_int("LYRICS_AUTO_LIMIT", 300, 1, 100000),
+        deezer_lyrics=env_flag("DEEZER_LYRICS"),
+        deezer_arl_file=os.environ.get("DEEZER_ARL_FILE", "").strip(),
+        deezer_arl=os.environ.get("DEEZER_ARL", ""),
     )
 
 
@@ -145,7 +152,7 @@ class Reviewer:
         self.library_lock = threading.Lock()
         self.status = {"scan": "not run yet", "suggest": "not run yet",
                        "tags": "nothing removed or restored yet",
-                       "lyrics": "not run yet"}
+                       "lyrics": "not run yet", "deezer": "not run yet"}
         self.tag_job = None
         self.lyrics_job = None
         self.lyrics_stop = threading.Event()
@@ -401,7 +408,11 @@ class Reviewer:
         return "Stopping the lyrics fill after the current track."
 
     def fill_lyrics(self, limit: int = 0, only_new: bool = False) -> dict:
-        """Look up missing lyrics (at most limit tracks; 0 = all due)."""
+        """Look up missing lyrics (at most limit tracks; 0 = all due).
+
+        LRCLIB goes first. When DEEZER_LYRICS is on, a Deezer pass then
+        covers what is still missing or plain-only (also at most limit).
+        """
         if not self.lyrics_lock.acquire(blocking=False):
             return {}
         connection = self.connect()
@@ -418,20 +429,60 @@ class Reviewer:
             result = lyrics.fill(connection, self.settings.library_dir,
                                  paths, stop=self.lyrics_stop,
                                  progress=progress)
+            message = (f"{store.now_display()}: {result['synced']} synced and "
+                       f"{result['plain']} plain lyrics files written, "
+                       f"{result['instrumental']} instrumental, "
+                       f"{result['notfound']} not on LRCLIB, "
+                       f"{result['error']} errors")
+            if result["reason"]:
+                message += f" ({result['reason']})"
+            self.status["lyrics"] = message
+            if self.settings.deezer_lyrics and not self.lyrics_stop.is_set():
+                result["deezer"] = self.fill_from_deezer(connection, limit)
         except Exception as error:  # shown on the Lyrics page
             self.status["lyrics"] = f"failed: {error}"
             return {}
         finally:
             connection.close()
             self.lyrics_lock.release()
+        return result
+
+    def deezer_client(self):
+        """A Deezer client with the ARL read fresh from file or setting."""
+        return deezer.Deezer(deezer.read_arl(self.settings.deezer_arl_file,
+                                             self.settings.deezer_arl))
+
+    def fill_from_deezer(self, connection, limit: int = 0) -> dict:
+        """The Deezer pass: tracks still missing or plain-only after LRCLIB."""
+        items = lyrics.deezer_due(connection, self.settings.library_dir)
+        if limit:
+            items = items[:limit]
+        if not items:
+            self.status["deezer"] = (f"{store.now_display()}: nothing due "
+                                     "for Deezer")
+            return {}
+
+        def progress(done, total, found):
+            self.status["deezer"] = (f"running: track {done} of {total}, "
+                                     f"{found} lyrics files written")
+
+        try:
+            result = lyrics.deezer_fill(
+                connection, self.settings.library_dir, items,
+                self.deezer_client(), stop=self.lyrics_stop,
+                progress=progress)
+        except deezer.DeezerError as error:  # no ARL at all
+            self.status["deezer"] = f"failed: {error}"
+            return {}
         message = (f"{store.now_display()}: {result['synced']} synced and "
                    f"{result['plain']} plain lyrics files written, "
-                   f"{result['instrumental']} instrumental, "
-                   f"{result['notfound']} not on LRCLIB, "
+                   f"{result['upgraded']} plain ones replaced by synced, "
+                   f"{result['nolyrics']} without (synced) lyrics, "
+                   f"{result['nomatch']} not found on Deezer, "
                    f"{result['error']} errors")
         if result["reason"]:
             message += f" ({result['reason']})"
-        self.status["lyrics"] = message
+        self.status["deezer"] = message
         return result
 
     def remove_lyrics_files(self) -> dict:

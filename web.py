@@ -13,6 +13,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlencode, urlsplit
 
+import deezer
 import lyrics
 import store
 import suggest
@@ -1164,7 +1165,7 @@ class Handler(BaseHTTPRequestHandler):
         ("plain-file", "Plain lyrics file (.txt)"),
         ("embedded", "Lyrics in the tags"),
         ("instrumental", "Instrumental"),
-        ("not-found", "Not on LRCLIB"),
+        ("not-found", "No lyrics found"),
         ("error", "Lookup failed"),
         ("unchecked", "Not looked up yet"),
     )
@@ -1176,9 +1177,13 @@ class Handler(BaseHTTPRequestHandler):
         try:
             cover = lyrics.coverage(connection, root)
             due = len(lyrics.due(connection, root, cover=cover))
-            written = connection.execute(
-                "SELECT COUNT(*) FROM lyrics WHERE written_file IS NOT NULL"
-            ).fetchone()[0]
+            use_deezer = self.reviewer.settings.deezer_lyrics
+            deezer_due = len(lyrics.deezer_due(connection, root, cover=cover)) \
+                if use_deezer else 0
+            sources = dict(connection.execute(
+                "SELECT source, COUNT(*) FROM lyrics WHERE written_file IS "
+                "NOT NULL GROUP BY source").fetchall())
+            written = sum(sources.values())
             albums = {row["path"]: row for row in connection.execute(
                 "SELECT tracks.path, albums.id, albums.albumartist, "
                 "albums.album FROM tracks JOIN albums ON albums.id = "
@@ -1207,15 +1212,22 @@ class Handler(BaseHTTPRequestHandler):
             "<tr><td colspan=\"2\">Every album has lyrics.</td></tr>")
         token = self.token_field()
         running = self.reviewer.lyrics_lock.locked()
-        minutes = round(due * lyrics.PAUSE * 1.5 / 60)
+        # LRCLIB: about 1.5 requests per track; Deezer: 2 at 1 per second.
+        minutes = round((due * lyrics.PAUSE * 1.5
+                         + deezer_due * deezer.PAUSE * 2) / 60)
         if running:
             control = (f"<form method=\"post\" action=\"/lyrics/stop\">"
                        f"{token}<button type=\"submit\">Stop the fill"
                        "</button></form>")
-        elif due:
+        elif due or deezer_due:
+            if not deezer_due:
+                label = f"{due} tracks"
+            else:
+                label = (f"{due} on LRCLIB, then " if due else "") \
+                    + f"{deezer_due} on Deezer"
             control = (f"<form method=\"post\" action=\"/lyrics/fill\">"
                        f"{token}<button type=\"submit\" class=\"primary\">"
-                       f"Fill missing lyrics ({due} tracks)</button></form>")
+                       f"Fill missing lyrics ({label})</button></form>")
         else:
             control = "<p>Nothing is due for a lookup right now.</p>"
         remove = "" if not written else (
@@ -1233,6 +1245,26 @@ class Handler(BaseHTTPRequestHandler):
                 "(set LYRICS_AUTO_FILL=1 to do it after each scan).")
         notice = f"<p class=\"notice\" role=\"status\">{esc(message)}</p>" \
             if message else ""
+        if use_deezer:
+            deezer_text = (
+                "<p>When LRCLIB has nothing, or only plain lyrics, Deezer is "
+                "asked next. A synced <code>.lrc</code> from Deezer replaces "
+                "a plain <code>.txt</code> that music-librarian wrote, if "
+                "that file is unchanged. Deezer's lyrics service is not a "
+                "published API, so it can stop working without notice.</p>")
+            deezer_status = (f"<p>Last Deezer pass: "
+                             f"{esc(self.reviewer.status['deezer'])}</p>")
+        else:
+            deezer_text = ("<p class=\"muted\">Deezer, a second source, is "
+                           "off (set DEEZER_LYRICS=1 to use it).</p>")
+            deezer_status = ""
+        source_text = ""
+        if written:
+            parts = [f"{count} from {'Deezer' if name == 'deezer' else 'LRCLIB'}"
+                     for name, count in sorted(sources.items(),
+                                               key=lambda item: item[0] or "")]
+            source_text = (f"<p class=\"muted\">Lyrics files written by "
+                           f"music-librarian: {', '.join(parts)}.</p>")
         self.send_page("Lyrics", (
             f"<h1>Lyrics</h1>{notice}"
             "<p>Tracks without lyrics are looked up on <a href=\"https://"
@@ -1241,13 +1273,15 @@ class Handler(BaseHTTPRequestHandler):
             "<code>.txt</code>, which is where myMPD and most players look. "
             "Existing lyrics are never replaced. Tracks LRCLIB doesn't have "
             f"are tried again after {lyrics.NOT_FOUND_RETRY_DAYS} days.</p>"
+            f"{deezer_text}"
             f"<h2 id=\"coverage\">Coverage</h2><ul class=\"cards\" "
-            f"aria-labelledby=\"coverage\">{cards}</ul>"
+            f"aria-labelledby=\"coverage\">{cards}</ul>{source_text}"
             f"<div class=\"panel\"><p>Last fill: "
-            f"{esc(self.reviewer.status['lyrics'])}</p>"
-            + (f"<p class=\"muted\">{due} tracks are due; at LRCLIB's "
-               f"requested pace that takes about {minutes} minutes.</p>"
-               if due and not running else "")
+            f"{esc(self.reviewer.status['lyrics'])}</p>{deezer_status}"
+            + (f"<p class=\"muted\">Lookups due: {due + deezer_due}. At "
+               f"the sources' requested pace that takes about {minutes} "
+               "minutes.</p>"
+               if (due or deezer_due) and not running else "")
             + f"<p class=\"muted\">{esc(auto)}</p>"
             f"<div class=\"toolbar\">{control}</div></div>"
             "<h2>Albums still missing lyrics</h2><table class=\"list\">"
