@@ -1,5 +1,5 @@
 name: Bug report
-description: Report a problem with genre-review
+description: Report a problem with music-librarian
 labels: ["bug"]
 body:
   - type: textarea
@@ -19,4 +19,4 @@ body:
     id: version
     attributes:
       label: Image tag or commit
-      placeholder: ghcr.io/bonelifer/genre-review:latest
+      placeholder: ghcr.io/bonelifer/music-librarian:latest

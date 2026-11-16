@@ -1,7 +1,7 @@
-"""SQLite state for genre-review.
+"""SQLite state for music-librarian.
 
 Holds the album list built by the library scan, each track's genres (and
-the genres it had before genre-review first wrote it, for Revert), the
+the genres it had before music-librarian first wrote it, for Revert), the
 Last.fm suggestions, and a cache of Last.fm responses.
 
 Album statuses:
@@ -125,7 +125,7 @@ def connect(path: Path) -> sqlite3.Connection:
     version = connection.execute("PRAGMA user_version").fetchone()[0]
     if version > SCHEMA_VERSION:
         raise SystemExit(
-            f"{path} was written by a newer genre-review "
+            f"{path} was written by a newer music-librarian "
             f"(schema {version}, this version knows {SCHEMA_VERSION})."
         )
     for target, script in ((1, SCHEMA), (2, MIGRATION_2), (3, MIGRATION_3)):

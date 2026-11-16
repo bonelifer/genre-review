@@ -1,4 +1,4 @@
-"""Review web page for genre-review (plain HTML forms, no JavaScript).
+"""Review web page for music-librarian (plain HTML forms, no JavaScript).
 
 Every page works with a keyboard and a screen reader: real headings,
 labelled form controls, a skip link and visible focus. Forms that change
@@ -171,7 +171,7 @@ def serve(reviewer) -> None:
     """Run the review page until interrupted."""
     settings = reviewer.settings
     server = ReviewServer((settings.listen, settings.port), reviewer)
-    print(f"genre-review is listening on http://{settings.listen}:"
+    print(f"music-librarian is listening on http://{settings.listen}:"
           f"{settings.port}/", flush=True)
     server.serve_forever()
 
@@ -233,7 +233,7 @@ def clean_genres(values) -> list:
 class Handler(BaseHTTPRequestHandler):
     """Routes for the review page."""
 
-    server_version = "genre-review"
+    server_version = "music-librarian"
 
     def log_message(self, format, *args):  # noqa: A002 (stdlib signature)
         """Keep request logging quiet; errors are shown on the page."""
@@ -251,7 +251,7 @@ class Handler(BaseHTTPRequestHandler):
         page = (
             "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
             "<meta name=\"viewport\" content=\"width=device-width, "
-            f"initial-scale=1\"><title>{esc(title)} - Genre review</title>"
+            f"initial-scale=1\"><title>{esc(title)} - Music librarian</title>"
             f"<style>{STYLE}</style></head><body>"
             "<a class=\"skip\" href=\"#main\">Skip to content</a>"
             f"<header><nav aria-label=\"Main\"><ul>{self.nav_links()}"
@@ -276,7 +276,7 @@ class Handler(BaseHTTPRequestHandler):
                                      "Waiting for review"),
                  ("/next", "Next album"), ("/bulk", "Bulk accept"),
                  ("/tags", "Tags"), ("/lyrics", "Lyrics")]
-        items = ["<li class=\"brand\">Genre review</li>"]
+        items = ["<li class=\"brand\">Music librarian</li>"]
         for href, label in links:
             current = ' aria-current="page"' \
                 if href.split("?")[0] == path else ""
@@ -1095,10 +1095,10 @@ class Handler(BaseHTTPRequestHandler):
             control = "<p>Nothing is due for a lookup right now.</p>"
         remove = "" if not written else (
             f"<h2>Undo</h2><form method=\"post\" action=\"/lyrics/remove\">"
-            f"{token}<p>genre-review has written {written} lyrics files. "
+            f"{token}<p>music-librarian has written {written} lyrics files. "
             "Removing them deletes only files that are still exactly as "
             "written.</p><p><label><input type=\"checkbox\" name=\"confirm\" "
-            "value=\"yes\"> Yes, delete the lyrics files genre-review wrote"
+            "value=\"yes\"> Yes, delete the lyrics files music-librarian wrote"
             "</label></p><button type=\"submit\">Remove written lyrics files"
             "</button></form>")
         auto = ("New tracks are looked up automatically after each scan (up "

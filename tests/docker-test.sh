@@ -15,7 +15,7 @@ fi
 for version in "${versions[@]}"; do
     echo "=== Python ${version} ==="
     docker run --rm --network bridge \
-        --name "genre-review-tests-${version//./-}-$$" \
+        --name "music-librarian-tests-${version//./-}-$$" \
         -v "${project}:/src:ro" -w /tmp \
         "python:${version}-slim" \
         bash -c 'cp -r /src /tmp/project && cd /tmp/project \

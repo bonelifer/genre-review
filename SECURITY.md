@@ -1,3 +1,3 @@
 # Security reporting
 
-Email bonelifer@gmail.com and include the repository name, genre-review.
+Email bonelifer@gmail.com and include the repository name, music-librarian.

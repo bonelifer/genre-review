@@ -26,7 +26,7 @@ DESCRIBED = {"TXXX", "WXXX", "COMM", "USLT", "SYLT", "GEOB", "APIC"}
 OWNED = {"PRIV", "UFID"}
 
 # Fields that can never be removed: what identifies, plays or shows a
-# track, plus everything genre-review itself writes.
+# track, plus everything music-librarian itself writes.
 PROTECTED_IDS = {
     "TIT2", "TPE1", "TPE2", "TALB", "TRCK", "TPOS", "TDRC", "TYER", "TDAT",
     "TCON", "APIC",
