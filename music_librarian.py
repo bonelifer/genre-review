@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""genre-review: review Last.fm genre suggestions per album, then write them.
+"""music-librarian: look after a music library's genres, tags and lyrics.
 
 Commands:
     serve    run the review web page, rescanning the library on a timer
@@ -50,7 +50,35 @@ class Settings:
     @property
     def db_path(self) -> Path:
         """Location of the SQLite state database."""
-        return self.state_dir / "genre-review.db"
+        return self.state_dir / "music-librarian.db"
+
+
+# The app was called genre-review before 11/16/2026; its database had this name.
+OLD_DB_NAME = "genre-review.db"
+
+
+def adopt_old_database(settings: Settings, log=print) -> None:
+    """Rename a database left by the old genre-review name, if there is one.
+
+    Does nothing when the new database already exists or no old one is found.
+    The old database's write-ahead log is folded in first, so only the main
+    file has to move.
+    """
+    old = settings.state_dir / OLD_DB_NAME
+    new = settings.db_path
+    if new.exists() or not old.exists():
+        return
+    connection = sqlite3.connect(old)
+    try:
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    finally:
+        connection.close()
+    os.replace(old, new)
+    for suffix in ("-wal", "-shm"):
+        leftover = old.with_name(old.name + suffix)
+        if leftover.exists():
+            leftover.unlink()
+    log(f"renamed {old.name} to {new.name}")
 
 
 def env_int(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -111,6 +139,7 @@ class Reviewer:
     def __init__(self, settings: Settings, log=print):
         self.settings = settings
         self.log = log
+        adopt_old_database(settings, log)
         self.whitelist = suggest.load_whitelist()
         # Scans and tag writes never run at the same time.
         self.library_lock = threading.Lock()
@@ -201,7 +230,7 @@ class Reviewer:
             connection, self.settings.library_dir, album_id, genres))
 
     def revert(self, album_id: int) -> dict:
-        """Restore an album's genres from before genre-review wrote them."""
+        """Restore an album's genres from before music-librarian wrote them."""
         return self._write(album_id, lambda connection: library.revert_album(
             connection, self.settings.library_dir, album_id))
 
@@ -388,7 +417,7 @@ class Reviewer:
         return result
 
     def remove_lyrics_files(self) -> dict:
-        """Delete lyrics files genre-review wrote (unchanged ones only)."""
+        """Delete lyrics files music-librarian wrote (unchanged ones only)."""
         if self.lyrics_lock.locked():
             return {"removed": 0, "kept": 0,
                     "error": "Stop the lyrics fill first."}

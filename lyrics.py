@@ -10,7 +10,7 @@ name, the way myMPD and most players look for it:
 
 Existing files are never overwritten. Every file written is recorded with
 its SHA-256, so "remove written files" only deletes files that are still
-exactly as genre-review wrote them.
+exactly as music-librarian wrote them.
 
 Requests go one at a time with a pause between them, identify this client
 in the User-Agent, and honour Retry-After on HTTP 429, as LRCLIB asks for
@@ -36,7 +36,7 @@ import mutagen
 import store
 
 API = "https://lrclib.net/api/"
-USER_AGENT = "genre-review 1.0 (https://github.com/bonelifer/genre-review)"
+USER_AGENT = "music-librarian 1.0 (https://github.com/bonelifer/music-librarian)"
 TIMEOUT = 20
 PAUSE = 0.75          # seconds between requests (about 80 a minute)
 ATTEMPTS = 3          # per request, for timeouts and server errors
@@ -399,7 +399,7 @@ def fill(connection: sqlite3.Connection, root: Path, paths, client=None,
 
 
 def remove_written(connection: sqlite3.Connection, root: Path) -> dict:
-    """Delete sidecar files genre-review wrote, if still unchanged."""
+    """Delete sidecar files music-librarian wrote, if still unchanged."""
     removed = kept = 0
     rows = connection.execute(
         "SELECT path, written_file, written_sha256 FROM lyrics WHERE "

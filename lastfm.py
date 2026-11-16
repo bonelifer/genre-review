@@ -18,7 +18,7 @@ from urllib.request import Request, urlopen
 import store
 
 API_URL = "https://ws.audioscrobbler.com/2.0/"
-USER_AGENT = "genre-review/1.0 (+https://github.com/bonelifer/genre-review)"
+USER_AGENT = "music-librarian/1.0 (+https://github.com/bonelifer/music-librarian)"
 TIMEOUT = 15
 MIN_INTERVAL = 0.25
 ATTEMPTS = 4

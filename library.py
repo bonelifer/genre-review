@@ -295,7 +295,7 @@ def apply_album(connection: sqlite3.Connection, root: Path, album_id: int,
 
 def revert_album(connection: sqlite3.Connection, root: Path,
                  album_id: int) -> dict:
-    """Put back each track's genres from before genre-review wrote them.
+    """Put back each track's genres from before music-librarian wrote them.
 
     Tracks without a backup (never written, or already restored) are left
     alone.

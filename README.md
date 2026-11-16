@@ -1,10 +1,14 @@
-# genre-review
+# music-librarian
 
-A small web page for cleaning up the genre tags in a music library one album
-at a time. It suggests genres from Last.fm, you pick the ones you want, and
-it writes only the genre tag into the files. Other pages list every tag
-field in the library (removing the ones you don't want, with undo) and fill
-missing lyrics from LRCLIB.
+A small web page for looking after a music library. It cleans up genre tags
+one album at a time: it suggests genres from Last.fm, you pick the ones you
+want, and it writes only the genre tag into the files. Other pages list every
+tag field in the library (removing the ones you don't want, with undo) and
+fill missing lyrics from LRCLIB.
+
+It was called genre-review until 11/16/2026. An existing `genre-review.db`
+in the state folder is renamed to `music-librarian.db` on first start, so
+nothing is lost.
 
 Suggestions come from the album's Last.fm tags, with the artist's tags filling
 in when the album has few. Your current genre tags count too. Every name is
@@ -71,7 +75,7 @@ missing some. **Fill missing lyrics** looks those tracks up on
   LRCLIB asks for batch work. A first fill of about 13,000 tracks takes a
   few hours; the fill can be stopped and continues where it left off.
 - Tracks LRCLIB doesn't have are tried again after 90 days.
-- **Remove written lyrics files** deletes only files genre-review wrote and
+- **Remove written lyrics files** deletes only files music-librarian wrote and
   that are still unchanged.
 
 With `LYRICS_AUTO_FILL=1`, new tracks are looked up after each scan (up to
@@ -80,7 +84,7 @@ With `LYRICS_AUTO_FILL=1`, new tracks are looked up after each scan (up to
 ## Setup
 
 GitHub Actions builds the image on every push to `main` and publishes it as
-`ghcr.io/bonelifer/genre-review:latest`. `compose.yaml` uses that image.
+`ghcr.io/bonelifer/music-librarian:latest`. `compose.yaml` uses that image.
 
 ```bash
 cp .env.example .env
@@ -107,11 +111,11 @@ Without Docker, install Mutagen and run the script directly:
 
 ```bash
 python3 -m pip install mutagen==1.48.1
-LIBRARY_DIR=~/Music/library LASTFM_API_KEY=... ./genre_review.py serve
+LIBRARY_DIR=~/Music/library LASTFM_API_KEY=... ./music_librarian.py serve
 ```
 
-`./genre_review.py scan` and `./genre_review.py suggest` run one pass and
-exit. `./genre_review.py --help` lists every option; all settings are in
+`./music_librarian.py scan` and `./music_librarian.py suggest` run one pass and
+exit. `./music_librarian.py --help` lists every option; all settings are in
 [`.env.example`](.env.example).
 
 ## Before the first write
@@ -135,8 +139,8 @@ write tags to tiny generated MP3 and FLAC files.
 
 Contributions are welcome!
 
-- **Bug reports**: [Open an issue](https://github.com/bonelifer/genre-review/issues).
-- **Everything else** (questions, feature requests, ideas, general discussion): [Use Discussions](https://github.com/bonelifer/genre-review/discussions).
+- **Bug reports**: [Open an issue](https://github.com/bonelifer/music-librarian/issues).
+- **Everything else** (questions, feature requests, ideas, general discussion): [Use Discussions](https://github.com/bonelifer/music-librarian/discussions).
 - Pull requests are welcome for bug fixes or discussed features.
 
 ## Acknowledgments

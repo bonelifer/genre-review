@@ -1,4 +1,4 @@
-"""Offline tests for genre-review (no network; Last.fm and MPD are faked)."""
+"""Offline tests for music-librarian (no network; Last.fm and MPD are faked)."""
 
 import io
 import json
@@ -22,7 +22,7 @@ from mutagen.easyid3 import EasyID3  # noqa: E402
 from mutagen.flac import FLAC  # noqa: E402
 from mutagen.id3 import APIC, ID3, TPUB, TXXX  # noqa: E402
 
-import genre_review  # noqa: E402
+import music_librarian  # noqa: E402
 import lastfm  # noqa: E402
 import library  # noqa: E402
 import lyrics  # noqa: E402
@@ -536,13 +536,13 @@ class WebTests(unittest.TestCase):
         self.root = base / "library"
         self.track = self.root / "A/Album/01.mp3"
         make_mp3(self.track, genre=["Rock/Pop"])
-        settings = genre_review.Settings(
+        settings = music_librarian.Settings(
             library_dir=self.root, state_dir=base / "state",
             lastfm_api_key="", listen="127.0.0.1", port=0,
             scan_interval_minutes=0, max_genres=3, bulk_min_weight=60,
             mpd_host="127.0.0.1", mpd_port=1, mpd_password="",
             mpd_path_prefix="library")
-        self.reviewer = genre_review.Reviewer(settings, log=lambda _: None)
+        self.reviewer = music_librarian.Reviewer(settings, log=lambda _: None)
         self.reviewer.scan()
         db = self.reviewer.connect()
         db.execute("UPDATE albums SET suggestions = ?", (store.dumps([
@@ -859,13 +859,13 @@ class TagPageTests(unittest.TestCase):
         self.track = self.root / "A/Album/01.mp3"
         make_mp3(self.track)
         add_clutter(self.track)
-        settings = genre_review.Settings(
+        settings = music_librarian.Settings(
             library_dir=self.root, state_dir=base / "state",
             lastfm_api_key="", listen="127.0.0.1", port=0,
             scan_interval_minutes=0, max_genres=3, bulk_min_weight=60,
             mpd_host="127.0.0.1", mpd_port=1, mpd_password="",
             mpd_path_prefix="")
-        self.reviewer = genre_review.Reviewer(settings, log=lambda _: None)
+        self.reviewer = music_librarian.Reviewer(settings, log=lambda _: None)
         self.reviewer.scan()
         self.server = web.ReviewServer(("127.0.0.1", 0), self.reviewer)
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
@@ -1002,7 +1002,7 @@ class LyricsTests(unittest.TestCase):
                          "[00:01.00] la\n")
         self.assertEqual(two.with_suffix(".txt").read_text(), "words\n")
         self.assertFalse(four.with_suffix(".lrc").exists())
-        self.assertIn("genre-review", fake.agent)
+        self.assertIn("music-librarian", fake.agent)
         totals = lyrics.coverage(self.db, self.root)["totals"]
         self.assertEqual(totals, {"synced-file": 1, "plain-file": 1,
                                   "not-found": 1, "instrumental": 1})
@@ -1127,13 +1127,13 @@ class LyricsPageTests(unittest.TestCase):
         tags_ = EasyID3(self.track)
         tags_["title"] = "One"
         tags_.save()
-        settings = genre_review.Settings(
+        settings = music_librarian.Settings(
             library_dir=self.root, state_dir=base / "state",
             lastfm_api_key="", listen="127.0.0.1", port=0,
             scan_interval_minutes=0, max_genres=3, bulk_min_weight=60,
             mpd_host="127.0.0.1", mpd_port=1, mpd_password="",
             mpd_path_prefix="")
-        self.reviewer = genre_review.Reviewer(settings, log=lambda _: None)
+        self.reviewer = music_librarian.Reviewer(settings, log=lambda _: None)
         self.reviewer.scan()
         self.fake = FakeLrclib({("get", "One"): SYNCED})
         self.original = lyrics.Lrclib
@@ -1178,28 +1178,68 @@ class LyricsPageTests(unittest.TestCase):
         self.assertFalse(self.track.with_suffix(".lrc").exists())
 
 
+class OldDatabaseTests(unittest.TestCase):
+    """A database from the genre-review name is picked up on first start."""
+
+    def settings(self, base):
+        return music_librarian.Settings(
+            library_dir=base, state_dir=base / "state",
+            lastfm_api_key="", listen="127.0.0.1", port=0,
+            scan_interval_minutes=0, max_genres=3, bulk_min_weight=60,
+            mpd_host="127.0.0.1", mpd_port=1, mpd_password="",
+            mpd_path_prefix="library")
+
+    def test_old_database_is_renamed_with_its_data(self):
+        with tempfile.TemporaryDirectory() as folder:
+            settings = self.settings(Path(folder))
+            settings.state_dir.mkdir()
+            old = settings.state_dir / music_librarian.OLD_DB_NAME
+            connection = store.connect(old)
+            connection.execute(
+                "INSERT INTO tag_rules (field, updated_at) VALUES ('X', 'now')")
+            connection.commit()
+            connection.close()
+            music_librarian.adopt_old_database(settings, log=lambda _: None)
+            self.assertFalse(old.exists())
+            connection = store.connect(settings.db_path)
+            self.assertEqual(connection.execute(
+                "SELECT field FROM tag_rules").fetchall()[0][0], "X")
+            connection.close()
+
+    def test_existing_new_database_is_left_alone(self):
+        with tempfile.TemporaryDirectory() as folder:
+            settings = self.settings(Path(folder))
+            settings.state_dir.mkdir()
+            old = settings.state_dir / music_librarian.OLD_DB_NAME
+            old.write_bytes(b"old")
+            settings.db_path.write_bytes(b"new")
+            music_librarian.adopt_old_database(settings, log=lambda _: None)
+            self.assertEqual(old.read_bytes(), b"old")
+            self.assertEqual(settings.db_path.read_bytes(), b"new")
+
+
 class CliTests(unittest.TestCase):
     """No command prints help; settings are validated."""
 
     def test_no_arguments_prints_help(self):
         output = io.StringIO()
         with redirect_stdout(output):
-            self.assertEqual(genre_review.main([]), 0)
+            self.assertEqual(music_librarian.main([]), 0)
         self.assertIn("usage:", output.getvalue())
 
     def test_missing_library_is_a_clear_error(self):
         os.environ.pop("LIBRARY_DIR", None)
         with self.assertRaises(SystemExit) as caught:
-            genre_review.main(["scan"])
+            music_librarian.main(["scan"])
         self.assertIn("LIBRARY_DIR", str(caught.exception))
 
     def test_flag_setting(self):
         os.environ["LYRICS_AUTO_FILL"] = "maybe"
         try:
             with self.assertRaises(SystemExit):
-                genre_review.env_flag("LYRICS_AUTO_FILL")
+                music_librarian.env_flag("LYRICS_AUTO_FILL")
             os.environ["LYRICS_AUTO_FILL"] = "yes"
-            self.assertTrue(genre_review.env_flag("LYRICS_AUTO_FILL"))
+            self.assertTrue(music_librarian.env_flag("LYRICS_AUTO_FILL"))
         finally:
             del os.environ["LYRICS_AUTO_FILL"]
 
@@ -1208,7 +1248,7 @@ class CliTests(unittest.TestCase):
         try:
             with tempfile.TemporaryDirectory() as folder:
                 with self.assertRaises(SystemExit) as caught:
-                    genre_review.main(["-L", folder, "-S", folder, "scan"])
+                    music_librarian.main(["-L", folder, "-S", folder, "scan"])
             self.assertIn("MAX_GENRES", str(caught.exception))
         finally:
             del os.environ["MAX_GENRES"]

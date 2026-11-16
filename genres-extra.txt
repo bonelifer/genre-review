@@ -1,5 +1,5 @@
 # Common genres missing from genres.txt (beets' list). Part of
-# genre-review, GPL-3.0. One lower-case name per line.
+# music-librarian, GPL-3.0. One lower-case name per line.
 abstract hip hop
 acoustic rock
 adult contemporary
