@@ -361,7 +361,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.approve_ticked(form)
         if path in ("/lyrics/fill", "/lyrics/stop", "/lyrics/remove"):
             return self.lyrics_action(path.rsplit("/", 1)[1], form)
-        if path in ("/tags/rules", "/tags/apply", "/tags/restore"):
+        if path in ("/tags/rules", "/tags/apply", "/tags/restore",
+                    "/tags/auto"):
             return self.tag_action(path.rsplit("/", 1)[1], form)
         match = re.fullmatch(r"/album/(\d+)/restore-tags", path)
         if match:
@@ -763,6 +764,7 @@ class Handler(BaseHTTPRequestHandler):
         def work():
             try:
                 self.reviewer.scan()
+                self.reviewer.auto_clean()
                 self.reviewer.suggest_missing()
             except Exception as error:  # shown on the overview
                 self.reviewer.status["scan"] = f"failed: {error}"
@@ -899,6 +901,7 @@ class Handler(BaseHTTPRequestHandler):
             fields = tags.cached_inventory(connection)
             rules = tags.rule_fields(connection)
             targets = tags.cached_affected(connection, rules)
+            auto = tags.auto_clean_enabled(connection)
             pending = connection.execute(
                 "SELECT COUNT(*) FROM tracks WHERE fields IS NULL"
             ).fetchone()[0]
@@ -913,11 +916,13 @@ class Handler(BaseHTTPRequestHandler):
         rows = []
         for item in fields:
             field = item["field"]
-            if item["files"] == 0:
+            # Fields already removed everywhere stay listed, so they can be
+            # kept as rules for new downloads.
+            if item["files"] == 0 and not item["removed"]:
                 continue
             if item["protected"]:
                 pick = "<span class=\"badge\" title=\"Never removed\">kept</span>"
-            elif not item["mp3"]:
+            elif not item["mp3"] and not item["removed"]:
                 pick = ("<span class=\"muted\" title=\"Only MP3 files can "
                         "be cleaned\">-</span>")
             else:
@@ -930,10 +935,15 @@ class Handler(BaseHTTPRequestHandler):
                 f" <span class=\"muted\">({item['mp3']} MP3)</span>")
             examples = esc("; ".join(item["examples"])) or \
                 "<span class=\"muted\">-</span>"
+            origin = tags.source(field)
+            origin_cell = (f"{esc(origin[0])}<br><span class=\"muted\">"
+                           f"{esc(origin[1])}</span>" if origin else
+                           "<span class=\"muted\">-</span>")
             rows.append(
                 f"<tr><td class=\"pick\">{pick}</td>"
                 f"<td data-label=\"Field\">{esc(item['name'])}<br>"
                 f"<code class=\"muted\">{esc(field)}</code></td>"
+                f"<td data-label=\"Source\">{origin_cell}</td>"
                 f"<td data-label=\"Files\">{item['files']}{mp3_note}</td>"
                 f"<td data-label=\"Albums\"><a href=\"/tags/field?"
                 f"{urlencode({'name': field})}\">{item['albums']}</a></td>"
@@ -941,9 +951,18 @@ class Handler(BaseHTTPRequestHandler):
         table = (
             "<table class=\"list pickable\"><thead><tr>"
             "<th scope=\"col\" class=\"pick\">Remove</th>"
-            "<th scope=\"col\">Field</th><th scope=\"col\">Files</th>"
+            "<th scope=\"col\">Field</th><th scope=\"col\">Source</th>"
+            "<th scope=\"col\">Files</th>"
             "<th scope=\"col\">Albums</th><th scope=\"col\">Examples</th>"
             f"</tr></thead><tbody>{''.join(rows)}</tbody></table>")
+        auto_form = (
+            f"<form method=\"post\" action=\"/tags/auto\">{token}"
+            "<p><label><input type=\"checkbox\" name=\"enabled\" value=\"1\""
+            f"{' checked' if auto else ''}> Clean new and changed files "
+            "automatically after each scan</label></p>"
+            "<p class=\"muted\">Uses the fields marked for removal below, "
+            "with the same backups, so anything removed can be restored."
+            "</p><button type=\"submit\">Save</button></form>")
         album_count = len({album for _, album in targets})
         if rules and targets:
             preview = (
@@ -980,10 +999,13 @@ class Handler(BaseHTTPRequestHandler):
             "<em>Remove these tags from the files</em>. Fields marked "
             "<em>kept</em> (titles, artists, album, track numbers, dates, "
             "genres, cover art, ReplayGain and MusicBrainz IDs) can't be "
-            "removed. Only MP3 files are cleaned.</p>"
+            "removed. Only MP3 files are cleaned. The <em>ID3v1 tag</em> "
+            "row is the old-style copy of the tag some downloaders add at "
+            "the end of the file.</p>"
             f"<p class=\"muted\">Last tag job: "
             f"{esc(self.reviewer.status['tags'])}</p>{scanning}"
             f"<div class=\"panel\">{preview}</div>"
+            f"<h2>Automatic cleanup</h2><div class=\"panel\">{auto_form}</div>"
             f"<h2>Fields</h2><form method=\"post\" action=\"/tags/rules\">"
             f"{token}{table}<div class=\"actions\"><button type=\"submit\" "
             "class=\"primary\">Save removal choices</button></div></form>"
@@ -1023,6 +1045,16 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 connection.close()
             message = f"Saved: {count} fields marked for removal."
+        elif action == "auto":
+            enabled = form.get("enabled", [""])[0] == "1"
+            connection = self.db()
+            try:
+                tags.set_auto_clean(connection, enabled)
+            finally:
+                connection.close()
+            message = ("Automatic cleanup is on: new and changed files are "
+                       "cleaned after each scan." if enabled else
+                       "Automatic cleanup is off.")
         elif action == "apply":
             message = self.reviewer.start_tag_job("apply")
         else:

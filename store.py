@@ -18,7 +18,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 STATUSES = ("pending", "applied", "skipped", "ignored", "changed", "missing")
 
 SCHEMA = """
@@ -96,6 +96,19 @@ CREATE TABLE lyrics (
 CREATE INDEX lyrics_status ON lyrics (status);
 """
 
+# Schema 4: automatic tag cleanup and the ID3v1 field.
+#   settings  small key/value choices made on the pages (auto_clean).
+#   Every track's field list is cleared so the next scan reads the files
+#   again and records the new ID3v1 field.
+MIGRATION_4 = """
+CREATE TABLE settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+UPDATE tracks SET fields = NULL
+"""
+
 
 def now_iso() -> str:
     """Current UTC time as an ISO 8601 string (storage format)."""
@@ -128,7 +141,8 @@ def connect(path: Path) -> sqlite3.Connection:
             f"{path} was written by a newer music-librarian "
             f"(schema {version}, this version knows {SCHEMA_VERSION})."
         )
-    for target, script in ((1, SCHEMA), (2, MIGRATION_2), (3, MIGRATION_3)):
+    for target, script in ((1, SCHEMA), (2, MIGRATION_2), (3, MIGRATION_3),
+                           (4, MIGRATION_4)):
         if version < target:
             with transaction(connection):
                 # Another process may have migrated while we waited.
