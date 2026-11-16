@@ -32,33 +32,51 @@ FILTERS = {
 ORDER = "albumartist COLLATE NOCASE, album COLLATE NOCASE, id"
 # Lists whose albums can be ticked and approved together.
 APPROVABLE = ("pending", "changed", "skipped")
+# Theme picker choices: "auto" follows the system's light/dark setting.
+THEMES = {"auto": "Auto", "light": "Light", "dark": "Dark"}
+
+# Colors follow myMPD's look: its gray panels and the green highlight
+# (#28a745). Links use a lighter or darker green so text stays readable,
+# and solid buttons use #198754 so white text on them is readable too.
+DARK_COLORS = """color-scheme: dark;
+  --bg: #212529; --surface: #343a40; --stripe: #2b3035; --fg: #f8f9fa;
+  --muted: #adb5bd; --line: #495057; --accent: #28a745; --link: #45c867;
+  --button: #198754; --on-button: #fff; --header: #343a40;
+  --picked: #1e3a2a; --warn: #ea868f; --ok: #75b798; --ok-bg: #051b11;
+  --warn-bg: #2c0b0e; --info-bg: #2b3035;"""
 
 STYLE = """
-:root { color-scheme: light dark;
-  --bg: #ffffff; --surface: #f5f6f8; --stripe: #f8f9fb; --fg: #1b1c1e;
-  --muted: #5b6068; --line: #d6d9de; --accent: #0b57d0; --on-accent: #fff;
-  --picked: #e7effd; --warn: #a40000; --ok: #146c2e; --ok-bg: #e6f4ea;
-  --warn-bg: #fce8e6; --info-bg: #e8f0fe; --radius: 8px; }
-@media (prefers-color-scheme: dark) { :root {
-  --bg: #131416; --surface: #1d1f23; --stripe: #18191c; --fg: #e8eaed;
-  --muted: #a8adb4; --line: #3a3d42; --accent: #8ab4f8; --on-accent: #0b1a33;
-  --picked: #1f2c44; --warn: #ff8a80; --ok: #81c995; --ok-bg: #1e3326;
-  --warn-bg: #3b1f1d; --info-bg: #1f2c44; } }
+:root { color-scheme: light;
+  --bg: #f8f9fa; --surface: #e9ecef; --stripe: #f1f3f5; --fg: #212529;
+  --muted: #495057; --line: #ced4da; --accent: #198754; --link: #157347;
+  --button: #198754; --on-button: #fff; --header: #dee2e6;
+  --picked: #d1e7dd; --warn: #a52834; --ok: #0f5132; --ok-bg: #d1e7dd;
+  --warn-bg: #f8d7da; --info-bg: #e9ecef; --radius: 8px; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme=light]) { """ + DARK_COLORS + """ } }
+:root[data-theme=dark] { """ + DARK_COLORS + """ }
 * { box-sizing: border-box; }
 body { background: var(--bg); color: var(--fg); margin: 0;
   font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
-a { color: var(--accent); text-underline-offset: .15em; }
+a { color: var(--link); text-underline-offset: .15em; }
 :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
 .skip { position: absolute; left: -999px; }
 .skip:focus { left: 1rem; top: .5rem; z-index: 10; background: var(--bg);
   padding: .5rem .75rem; border-radius: var(--radius); }
-header { border-bottom: 1px solid var(--line); background: var(--surface); }
+header { border-bottom: 1px solid var(--line); background: var(--header); }
 header nav, main { max-width: 64rem; margin: 0 auto; padding: 0 1rem; }
 nav ul { list-style: none; margin: 0; padding: 0; display: flex;
   flex-wrap: wrap; gap: .25rem; align-items: center; }
 nav .brand { font-weight: 700; margin-right: auto; padding: .7rem 0; }
 nav a { display: inline-block; padding: .7rem .75rem; text-decoration: none;
-  border-bottom: 3px solid transparent; }
+  border-bottom: 3px solid transparent; color: var(--fg); }
+nav a:hover { border-bottom-color: var(--line); }
+.theme { display: flex; align-items: center; gap: .4rem; margin: 0;
+  padding: .35rem 0 .35rem .5rem; }
+.theme select { font: inherit; min-height: 2.25rem; padding: .25rem .4rem;
+  border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--bg); color: var(--fg); }
+.theme button { min-height: 2.25rem; padding: .25rem .75rem; }
 nav a[aria-current=page] { border-bottom-color: var(--accent);
   color: var(--fg); font-weight: 600; }
 main { padding-bottom: 3rem; }
@@ -85,8 +103,8 @@ h2 { font-size: 1.15rem; margin: 1.75rem 0 .5rem; }
   border: 1px solid var(--line); border-radius: var(--radius);
   background: var(--surface); color: var(--fg); text-decoration: none; }
 .btn:hover, button:hover { border-color: var(--accent); }
-.primary { background: var(--accent); border-color: var(--accent);
-  color: var(--on-accent); font-weight: 600; }
+.primary { background: var(--button); border-color: var(--button);
+  color: var(--on-button); font-weight: 600; }
 .primary:hover { filter: brightness(1.08); }
 .toolbar { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center;
   margin: 1rem 0; }
@@ -176,6 +194,25 @@ def serve(reviewer) -> None:
     server.serve_forever()
 
 
+def get_theme(connection) -> str:
+    """The saved theme choice ("auto", "light" or "dark")."""
+    row = connection.execute(
+        "SELECT value FROM settings WHERE key = 'theme'").fetchone()
+    return row[0] if row and row[0] in THEMES else "auto"
+
+
+def set_theme(connection, theme: str) -> None:
+    """Save the theme choice; unknown values fall back to "auto"."""
+    if theme not in THEMES:
+        theme = "auto"
+    with store.transaction(connection):
+        connection.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES "
+            "('theme', ?, ?) ON CONFLICT (key) DO UPDATE SET "
+            "value = excluded.value, updated_at = excluded.updated_at",
+            (theme, store.now_iso()))
+
+
 def esc(value) -> str:
     """HTML-escape any value."""
     return html.escape(str(value), quote=True)
@@ -248,14 +285,22 @@ class Handler(BaseHTTPRequestHandler):
     def send_page(self, title: str, body: str,
                   status: HTTPStatus = HTTPStatus.OK) -> None:
         """Wrap body in the page layout and send it."""
+        connection = self.db()
+        try:
+            theme = get_theme(connection)
+        finally:
+            connection.close()
+        # "auto" leaves data-theme off so the system setting decides.
+        theme_attr = "" if theme == "auto" else f' data-theme="{theme}"'
         page = (
-            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+            f"<!doctype html><html lang=\"en\"{theme_attr}><head>"
+            "<meta charset=\"utf-8\">"
             "<meta name=\"viewport\" content=\"width=device-width, "
             f"initial-scale=1\"><title>{esc(title)} - Music librarian</title>"
             f"<style>{STYLE}</style></head><body>"
             "<a class=\"skip\" href=\"#main\">Skip to content</a>"
             f"<header><nav aria-label=\"Main\"><ul>{self.nav_links()}"
-            "</ul></nav></header>"
+            f"<li>{self.theme_form(theme)}</li></ul></nav></header>"
             f"<main id=\"main\">{body}</main></body></html>"
         ).encode("utf-8")
         self.send_response(status)
@@ -282,6 +327,18 @@ class Handler(BaseHTTPRequestHandler):
                 if href.split("?")[0] == path else ""
             items.append(f"<li><a href=\"{href}\"{current}>{label}</a></li>")
         return "".join(items)
+
+    def theme_form(self, theme: str) -> str:
+        """Header form to pick Auto, Light or Dark colors."""
+        options = "".join(
+            f"<option value=\"{value}\""
+            f"{' selected' if value == theme else ''}>{label}</option>"
+            for value, label in THEMES.items())
+        return (f"<form class=\"theme\" method=\"post\" action=\"/theme\">"
+                f"{self.token_field()}<input type=\"hidden\" name=\"back\" "
+                f"value=\"{esc(self.path)}\"><label for=\"theme\">Theme"
+                f"</label><select id=\"theme\" name=\"theme\">{options}"
+                "</select><button type=\"submit\">Set</button></form>")
 
     def redirect(self, location: str) -> None:
         """303 redirect after a form post."""
@@ -353,6 +410,17 @@ class Handler(BaseHTTPRequestHandler):
                 "Expired form", "<h1>That form has expired</h1><p>Reload the "
                 "page and try again.</p>", HTTPStatus.FORBIDDEN)
         path = urlsplit(self.path).path
+        if path == "/theme":
+            connection = self.db()
+            try:
+                set_theme(connection, form.get("theme", [""])[0])
+            finally:
+                connection.close()
+            back = form.get("back", ["/"])[0]
+            # Only return to a page on this site.
+            if not back.startswith("/") or back.startswith("//"):
+                back = "/"
+            return self.redirect(back)
         if path == "/scan":
             return self.start_scan()
         if path == "/bulk":

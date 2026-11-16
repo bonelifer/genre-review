@@ -35,6 +35,9 @@ then list each genre on its own.
   them.
 - **Bulk accept** previews albums whose own Last.fm tags agree strongly, so
   you can approve many at once. Nothing is written until you confirm.
+- Uses myMPD's colors: its gray panels and green highlight. It follows your
+  system's light or dark setting, and the **Theme** picker in the header can
+  fix it to Light or Dark instead.
 
 ## Tag cleanup
 

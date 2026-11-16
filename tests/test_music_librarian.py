@@ -583,6 +583,28 @@ class WebTests(unittest.TestCase):
         self.assertIn('value="Rock" checked', body)
         self.assertIn("1 track in", body)
 
+    def test_theme_picker_saves_and_returns_to_the_page(self):
+        _, body = self.get("/")
+        self.assertIn('<html lang="en">', body)  # auto: no data-theme
+        self.assertIn('<option value="auto" selected>', body)
+        status, url = self.post("/theme", {"token": self.server.token,
+                                           "theme": "dark",
+                                           "back": "/tags?msg=x"})
+        self.assertEqual(status, 200)
+        self.assertTrue(url.endswith("/tags?msg=x"))
+        _, body = self.get("/")
+        self.assertIn('<html lang="en" data-theme="dark">', body)
+        self.assertIn('<option value="dark" selected>', body)
+        # Unknown values fall back to auto; outside addresses go home.
+        status, url = self.post("/theme", {"token": self.server.token,
+                                           "theme": "neon",
+                                           "back": "//example.com/"})
+        self.assertEqual(url, self.base + "/")
+        _, body = self.get("/")
+        self.assertIn('<html lang="en">', body)
+        status, _ = self.post("/theme", {"token": "wrong", "theme": "dark"})
+        self.assertEqual(status, 403)
+
     def test_apply_needs_the_token(self):
         status, _ = self.post("/album/1/apply", {"token": "wrong",
                                                  "genre": "Jazz"})
