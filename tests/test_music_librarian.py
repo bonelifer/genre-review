@@ -1000,6 +1000,8 @@ class TagPageTests(unittest.TestCase):
         self.assertIn('value="TPUB"', body)
         self.assertNotIn('value="TIT2"', body)
         self.assertIn(">kept<", body)
+        # Long field names and examples wrap inside the table cells.
+        self.assertIn(".list td { overflow-wrap: anywhere; }", body)
         self.assertIn("Artist - Album", self.get("/tags/field?name=TPUB"))
 
     def test_save_rules_remove_and_restore_through_the_page(self):

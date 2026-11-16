@@ -138,6 +138,9 @@ label { cursor: pointer; }
 table { border-collapse: collapse; width: 100%; }
 th, td { text-align: left; padding: .5rem .6rem; vertical-align: top;
   border-bottom: 1px solid var(--line); }
+/* Long unbroken values (M4A field names, AcoustID fingerprints) wrap
+   instead of pushing the table wider than the window. */
+.list td { overflow-wrap: anywhere; }
 .list tbody tr:nth-child(even) { background: var(--stripe); }
 .list tbody tr:hover { background: var(--surface); }
 .list tbody tr:has(input:checked) { background: var(--picked); }
