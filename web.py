@@ -189,9 +189,7 @@ def human_time(stamp) -> str:
         moment = datetime.fromisoformat(stamp)
     except ValueError:
         return esc(stamp)
-    hour = moment.hour % 12 or 12
-    return (f"{moment:%m/%d/%Y} {hour}:{moment:%M} "
-            f"{'AM' if moment.hour < 12 else 'PM'} UTC")
+    return store.display_time(moment)
 
 
 def genre_list(genres) -> str:

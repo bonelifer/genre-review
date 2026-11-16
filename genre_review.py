@@ -138,7 +138,7 @@ class Reviewer:
             finally:
                 connection.close()
         self.status["scan"] = (
-            f"{store.now_iso()}: {result['files']} files, "
+            f"{store.now_display()}: {result['files']} files, "
             f"{result['albums']} albums, {result['new_albums']} new, "
             f"{result['errors']} unreadable")
         return result
@@ -180,7 +180,7 @@ class Reviewer:
                 done += 1
         finally:
             connection.close()
-        self.status["suggest"] = f"{store.now_iso()}: {done} albums looked up"
+        self.status["suggest"] = f"{store.now_display()}: {done} albums looked up"
         return done
 
     def suggestions_for(self, client, row) -> list:
@@ -282,7 +282,7 @@ class Reviewer:
         mpd_note = self.update_mpd_folders(folders)
         self.warm_tag_cache()
         done = "Removed tags from" if kind == "apply" else "Restored tags in"
-        message = (f"{store.now_iso()}: {done} {result['files']} files in "
+        message = (f"{store.now_display()}: {done} {result['files']} files in "
                    f"{len(result['albums'])} albums.")
         if result["errors"]:
             message += (f" {len(result['errors'])} files failed: "
@@ -377,7 +377,7 @@ class Reviewer:
         finally:
             connection.close()
             self.lyrics_lock.release()
-        message = (f"{store.now_iso()}: {result['synced']} synced and "
+        message = (f"{store.now_display()}: {result['synced']} synced and "
                    f"{result['plain']} plain lyrics files written, "
                    f"{result['instrumental']} instrumental, "
                    f"{result['notfound']} not on LRCLIB, "
