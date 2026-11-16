@@ -102,6 +102,18 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
+def display_time(moment: datetime) -> str:
+    """A UTC datetime as 'MM/DD/YYYY h:mm AM UTC' (display format)."""
+    hour = moment.hour % 12 or 12
+    return (f"{moment:%m/%d/%Y} {hour}:{moment:%M} "
+            f"{'AM' if moment.hour < 12 else 'PM'} UTC")
+
+
+def now_display() -> str:
+    """Current UTC time in the display format, for status lines."""
+    return display_time(datetime.now(timezone.utc))
+
+
 def connect(path: Path) -> sqlite3.Connection:
     """Open (creating or migrating) the state database at path."""
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -69,6 +69,19 @@ def genres_of(path: Path):
     return list(mutagen.File(path, easy=True).tags.get("genre", []))
 
 
+class TimeFormatTests(unittest.TestCase):
+    """Times shown to the user use MM/DD/YYYY h:mm AM/PM UTC."""
+
+    def test_display_time(self):
+        from datetime import datetime, timezone
+        self.assertEqual(store.display_time(datetime(
+            2026, 11, 16, 9, 5, tzinfo=timezone.utc)), "11/16/2026 9:05 AM UTC")
+        self.assertEqual(store.display_time(datetime(
+            2026, 11, 16, 0, 30, tzinfo=timezone.utc)), "11/16/2026 12:30 AM UTC")
+        self.assertEqual(web.human_time("2026-11-16T21:56:45+00:00"),
+                         "11/16/2026 9:56 PM UTC")
+
+
 class SuggestTests(unittest.TestCase):
     """Curated-list matching and ranking."""
 
@@ -1154,6 +1167,8 @@ class LyricsPageTests(unittest.TestCase):
         self.reviewer.lyrics_job.join(10)
         self.assertTrue(self.track.with_suffix(".lrc").exists())
         self.assertIn("1 synced", self.reviewer.status["lyrics"])
+        self.assertRegex(self.reviewer.status["lyrics"],
+                         r"^\d\d/\d\d/\d{4} \d{1,2}:\d\d [AP]M UTC: ")
         url = self.post("/lyrics/remove", {"token": self.server.token})
         self.assertIn("tick+the+box", url)
         self.assertTrue(self.track.with_suffix(".lrc").exists())
