@@ -111,6 +111,7 @@ mkdir data
 your user, since the container runs as UID 1000. In `.env`, set
 `LASTFM_API_KEY`, `MUSIC_LIBRARY` (the host folder to review) and
 `MPD_PATH_PREFIX` (where that folder sits inside MPD's `music_directory`).
+`TZ` sets the time zone the page shows times in; stored times are always UTC.
 Then start it:
 
 ```bash

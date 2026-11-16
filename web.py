@@ -237,7 +237,7 @@ def esc(value) -> str:
 
 
 def human_time(stamp) -> str:
-    """ISO UTC timestamp as 'MM/DD/YYYY h:mm AM UTC' ('' if missing)."""
+    """Stored ISO UTC timestamp in local display format ('' if missing)."""
     if not stamp:
         return ""
     try:
