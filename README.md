@@ -158,6 +158,23 @@ LIBRARY_DIR=~/Music/library LASTFM_API_KEY=... ./music_librarian.py serve
 exit. `./music_librarian.py --help` lists every option; all settings are in
 [`.env.example`](.env.example).
 
+### myMPD Home tile
+
+`install-mympd-tile.py` adds a tile to myMPD's Home screen that opens this
+page in a new tab:
+
+```bash
+./install-mympd-tile.py --mympd http://127.0.0.1:8081 --url http://127.0.0.1:18771/
+```
+
+`--url` is the address the browser showing myMPD uses to reach the page.
+Since the page listens on 127.0.0.1 only, the address above works only in a
+browser on the same machine. The tile uses myMPD's built-in `library_music`
+icon, so nothing is copied into myMPD's workdir. Run the script again to
+change the address; it updates the same tile instead of adding a second one.
+`--partition` picks a myMPD partition other than `default`, and
+`MYMPD_SESSION` passes a session when myMPD has a PIN set.
+
 ## Before the first write
 
 Writing a tag rewrites the file's tag block. The audio is not touched, but
